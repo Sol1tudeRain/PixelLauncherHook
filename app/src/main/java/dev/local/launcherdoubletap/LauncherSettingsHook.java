@@ -118,6 +118,47 @@ final class LauncherSettingsHook {
         }
     }
 
+
+    /** Find an existing working Launcher switch, including those inside preference groups. */
+    private static Object findNativeSwitch(Object parent, Class<?> twoState, ClassLoader loader,
+                                           int depth) {
+        if(depth>5 || parent==null)return null;
+        Class<?> group=XposedHelpers.findClassIfExists("androidx.preference.PreferenceGroup",loader);
+        if(group==null || !group.isInstance(parent))return null;
+        try {
+            int count=((Number)XposedHelpers.callMethod(parent,"getPreferenceCount")).intValue();
+            for(int i=0;i<count;i++) {
+                Object child=XposedHelpers.callMethod(parent,"getPreference",new Class<?>[]{int.class},i);
+                if(child==null)continue;
+                if(twoState.isInstance(child)) {
+                    // Reuse the actual working widget resource, not the default style of
+                    // a programmatically-created SwitchPreferenceCompat.
+                    try {
+                        int widget=XposedHelpers.getIntField(child,"mWidgetLayoutResId");
+                        if(widget>0)return child;
+                    } catch(Throwable ignored) { }
+                }
+                Object nested=findNativeSwitch(child,twoState,loader,depth+1);
+                if(nested!=null)return nested;
+            }
+        } catch(Throwable e) { XposedBridge.log(TAG+"Native switch lookup error: "+e); }
+        return null;
+    }
+
+    private static void copyNativePreferenceLayout(Object source,Object destination) {
+        for(String field : new String[]{"mLayoutResId","mWidgetLayoutResId"}) {
+            try {
+                int value=XposedHelpers.getIntField(source,field);
+                if(value>0)XposedHelpers.setIntField(destination,field,value);
+            } catch(Throwable e) { XposedBridge.log(TAG+"Copy "+field+" unavailable: "+e); }
+        }
+        try {
+            XposedBridge.log(TAG+"Switch layout copied from "+source.getClass().getName()
+                    +" widget="+XposedHelpers.getIntField(destination,"mWidgetLayoutResId")
+                    +" row="+XposedHelpers.getIntField(destination,"mLayoutResId"));
+        } catch(Throwable ignored) { }
+    }
+
     private static void addSwitch(Object fragment, ClassLoader loader) throws Exception {
         Activity activity = (Activity) XposedHelpers.callMethod(fragment, "getActivity");
         if (activity == null || !"com.google.android.apps.nexuslauncher".equals(activity.getPackageName())) return;
@@ -134,7 +175,22 @@ final class LauncherSettingsHook {
         // Follow Pixel Launcher's own Preference style, theme, fonts and switch layout.
         Class<?> switchClass = XposedHelpers.findClassIfExists("androidx.preference.SwitchPreferenceCompat", loader);
         if (switchClass == null) switchClass = XposedHelpers.findClass("androidx.preference.SwitchPreference", loader);
-        Object toggle = newSwitchPreference(switchClass, activity);
+        Class<?> twoStateClass=XposedHelpers.findClassIfExists("androidx.preference.TwoStatePreference",loader);
+        Object template=twoStateClass==null ? null : findNativeSwitch(screen,twoStateClass,loader,0);
+        Object toggle=null;
+        if(template!=null && switchClass.isAssignableFrom(template.getClass())) {
+            try { toggle=newSwitchPreference(template.getClass(),activity); }
+            catch(Exception e) { XposedBridge.log(TAG+"Native switch constructor unavailable: "+e); }
+        }
+        if(toggle==null) toggle=newSwitchPreference(switchClass,activity);
+        if(template!=null) copyNativePreferenceLayout(template,toggle);
+        // No icon is supplied. Match Pixel Launcher's other settings rows (no empty
+        // icon column), irrespective of the Preference default style.
+        try { XposedHelpers.setBooleanField(toggle,"mIconSpaceReserved",false); }
+        catch(Throwable ignored) {
+            try { XposedHelpers.callMethod(toggle,"setIconSpaceReserved",false); }
+            catch(Throwable other) { XposedBridge.log(TAG+"Cannot disable icon placeholder: "+other); }
+        }
         boolean chinese = Locale.getDefault().getLanguage().equals("zh");
         setPreferenceValue(toggle, "setKey", "mKey", KEY);
         // setPersistent(boolean) is removed in this optimized PixelOS Launcher.
@@ -161,6 +217,7 @@ final class LauncherSettingsHook {
         launcherApplication=activity.getApplicationContext();
         XposedHelpers.callMethod(screen, "addPreference", toggle);
         INJECTED_SWITCHES.add(toggle);
-        XposedBridge.log(TAG + "Native home settings toggle added");
+        XposedBridge.log(TAG + "Native home settings toggle added; referenceSwitch="+(template!=null)
+                +" switchClass="+toggle.getClass().getName());
     }
 }
