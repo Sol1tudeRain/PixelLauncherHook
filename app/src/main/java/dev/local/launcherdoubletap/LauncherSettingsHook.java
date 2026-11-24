@@ -78,6 +78,16 @@ final class LauncherSettingsHook {
         throw new NoSuchMethodException(cls.getName() + " lacks a usable Context/AttributeSet constructor");
     }
 
+    /** Compatible with R8-inlined AndroidX preference setters. */
+    private static void setPreferenceValue(Object target, String method, String field, Object value) {
+        try {
+            XposedHelpers.callMethod(target, method, value);
+        } catch (NoSuchMethodError ignored) {
+            XposedHelpers.setObjectField(target, field, value);
+            XposedBridge.log(TAG + method + " optimized away; assigned " + field + " directly");
+        }
+    }
+
     private static void addSwitch(Object fragment, ClassLoader loader) throws Exception {
         Activity activity = (Activity) XposedHelpers.callMethod(fragment, "getActivity");
         if (activity == null || !"com.google.android.apps.nexuslauncher".equals(activity.getPackageName())) return;
@@ -96,14 +106,24 @@ final class LauncherSettingsHook {
         if (switchClass == null) switchClass = XposedHelpers.findClass("androidx.preference.SwitchPreference", loader);
         Object toggle = newSwitchPreference(switchClass, activity);
         boolean chinese = Locale.getDefault().getLanguage().equals("zh");
-        XposedHelpers.callMethod(toggle, "setKey", KEY);
-        XposedHelpers.callMethod(toggle, "setPersistent", false);
-        XposedHelpers.callMethod(toggle, "setOrder", -100);
-        XposedHelpers.callMethod(toggle, "setTitle", (CharSequence) (chinese
+        setPreferenceValue(toggle, "setKey", "mKey", KEY);
+        // setPersistent(boolean) is removed in this optimized PixelOS Launcher.
+        // Prefer the backing field; our dedicated SharedPreferences remains authoritative.
+        try { XposedHelpers.setBooleanField(toggle, "mPersistent", false); }
+        catch (Throwable ignored) { XposedBridge.log(TAG + "mPersistent field unavailable, using Launcher default preference persistence"); }
+        try { XposedHelpers.callMethod(toggle, "setOrder", -100); }
+        catch (NoSuchMethodError ignored) {
+            try { XposedHelpers.setIntField(toggle, "mOrder", -100); }
+            catch (Throwable ignoredField) { /* optional: append at end */ }
+        }
+        setPreferenceValue(toggle, "setTitle", "mTitle", (CharSequence) (chinese
                 ? "双击桌面空白处锁屏" : "Double tap to lock"));
-        XposedHelpers.callMethod(toggle, "setSummary", (CharSequence) (chinese
+        setPreferenceValue(toggle, "setSummary", "mSummary", (CharSequence) (chinese
                 ? "双击主屏幕空白位置关闭屏幕" : "Double tap an empty area of the home screen to turn off the display"));
-        XposedHelpers.callMethod(toggle, "setChecked", isEnabled(activity));
+        try { XposedHelpers.callMethod(toggle, "setChecked", isEnabled(activity)); }
+        catch(NoSuchMethodError ignored) {
+            XposedHelpers.setBooleanField(toggle, "mChecked", isEnabled(activity));
+        }
 
         Class<?> changeListener = XposedHelpers.findClass(
                 "androidx.preference.Preference$OnPreferenceChangeListener", loader);
@@ -121,7 +141,7 @@ final class LauncherSettingsHook {
             return null;
         };
         Object listener = Proxy.newProxyInstance(loader, new Class<?>[]{changeListener}, callback);
-        XposedHelpers.callMethod(toggle, "setOnPreferenceChangeListener", listener);
+        setPreferenceValue(toggle, "setOnPreferenceChangeListener", "mOnChangeListener", listener);
         XposedHelpers.callMethod(screen, "addPreference", toggle);
         XposedBridge.log(TAG + "Native home settings toggle added");
     }
