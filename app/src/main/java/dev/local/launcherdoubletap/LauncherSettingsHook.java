@@ -6,8 +6,9 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.util.AttributeSet;
 import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Proxy;
+import java.util.Collections;
+import java.util.Set;
+import java.util.WeakHashMap;
 import java.util.Locale;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -23,6 +24,12 @@ final class LauncherSettingsHook {
     private static final String FILE = "launcher_double_tap_settings";
     private static final String KEY = "launcher_double_tap_sleep_enabled";
     private static final String ROOT_ARG = "androidx.preference.PreferenceFragmentCompat.PREFERENCE_ROOT";
+    // Keep only weak references to injected UI preferences. The application context
+    // is safe to retain (unlike SettingsActivity / fragment instances).
+    private static final Set<Object> INJECTED_SWITCHES =
+            Collections.newSetFromMap(new WeakHashMap<Object, Boolean>());
+    private static volatile Context launcherApplication;
+
 
     private LauncherSettingsHook() {}
 
@@ -35,6 +42,29 @@ final class LauncherSettingsHook {
     }
 
     static void install(ClassLoader loader) {
+        // TwoStatePreference.onClick calls setChecked when the switch changes.
+        // Hook that existing method instead of resolving a listener interface that
+        // can be absent or obfuscated in PixelOS' prebuilt Pixel Launcher.
+        Class<?> twoState = XposedHelpers.findClassIfExists(
+                "androidx.preference.TwoStatePreference", loader);
+        if(twoState!=null) {
+            java.util.Set<XC_MethodHook.Unhook> hooks=XposedBridge.hookAllMethods(
+                    twoState,"setChecked",new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam param) {
+                    if(param.hasThrowable() || param.args.length!=1
+                            || !(param.args[0] instanceof Boolean))return;
+                    if(!INJECTED_SWITCHES.contains(param.thisObject))return;
+                    Context app=launcherApplication;
+                    if(app==null)return;
+                    boolean enabled=(Boolean)param.args[0];
+                    preferences(app).edit().putBoolean(KEY,enabled).apply();
+                    XposedBridge.log(TAG+"Double tap lock "+(enabled?"enabled":"disabled"));
+                }
+            });
+            XposedBridge.log(TAG+"TwoStatePreference.setChecked hooks="+hooks.size());
+        } else {
+            XposedBridge.log(TAG+"No TwoStatePreference found; toggle changes cannot be persisted");
+        }
         Class<?> fragmentClass = XposedHelpers.findClassIfExists(
                 "androidx.preference.PreferenceFragmentCompat", loader);
         if (fragmentClass == null) {
@@ -125,24 +155,12 @@ final class LauncherSettingsHook {
             XposedHelpers.setBooleanField(toggle, "mChecked", isEnabled(activity));
         }
 
-        Class<?> changeListener = XposedHelpers.findClass(
-                "androidx.preference.Preference$OnPreferenceChangeListener", loader);
-        InvocationHandler callback = (proxy, method, args) -> {
-            if ("onPreferenceChange".equals(method.getName()) && args != null && args.length == 2) {
-                if (!(args[1] instanceof Boolean)) return false;
-                boolean enabled = (Boolean) args[1];
-                preferences(activity).edit().putBoolean(KEY, enabled).apply();
-                XposedBridge.log(TAG + "Double tap lock " + (enabled ? "enabled" : "disabled"));
-                return true;
-            }
-            if ("toString".equals(method.getName())) return "LauncherDoubleTapPreferenceListener";
-            if ("hashCode".equals(method.getName())) return System.identityHashCode(proxy);
-            if ("equals".equals(method.getName())) return args != null && args.length > 0 && proxy == args[0];
-            return null;
-        };
-        Object listener = Proxy.newProxyInstance(loader, new Class<?>[]{changeListener}, callback);
-        setPreferenceValue(toggle, "setOnPreferenceChangeListener", "mOnChangeListener", listener);
+        // Add the switch as a normal Launcher preference. Its AndroidX onClick
+        // implementation triggers TwoStatePreference.setChecked, hooked above.
+        // No OnPreferenceChangeListener reflection required.
+        launcherApplication=activity.getApplicationContext();
         XposedHelpers.callMethod(screen, "addPreference", toggle);
+        INJECTED_SWITCHES.add(toggle);
         XposedBridge.log(TAG + "Native home settings toggle added");
     }
 }
