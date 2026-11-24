@@ -15,6 +15,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.WeakHashMap;
+import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicBoolean;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -29,6 +30,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
+    private final HashSet<String> gestureTraceOnce=new HashSet<>();
     private Class<?> launcherClass, workspaceClass, cellClass, containerClass, floatingClass;
     private Object normalState;
     private Method topOpen;
@@ -87,6 +89,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         }
         throw new NoSuchMethodException("dispatchTouchEvent");
     }
+    /** At most one anonymous diagnostic for each decision path per launcher process. */
+    private void trace(String message) {
+        if(gestureTraceOnce.size()<40 && gestureTraceOnce.add(message))
+            XposedBridge.log(TAG+"Gesture trace: "+message);
+    }
     private TapTracker tracker(Activity a) {
         TapTracker t=trackers.get(a);
         if(t==null) {
@@ -105,6 +112,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         float x=e.getRawX(),y=e.getRawY();
         switch(e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                trace("Launcher receives touch events");
                 t.start(e.getEventTime(),x,y,emptyPage(a,x,y)); break;
             case MotionEvent.ACTION_MOVE:
                 if(t.isDown()) {
@@ -117,6 +125,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             case MotionEvent.ACTION_UP:
                 if(t.isDown() && t.finish(e.getEventTime(),x,y,emptyPage(a,x,y))) {
                     p.setObjectExtra("launcherDoubleTap",true);
+                    trace("DOUBLE TAP ACCEPTED");
                 } else if(t.isDown()) t.reset();
                 break;
             case MotionEvent.ACTION_CANCEL:
@@ -127,12 +136,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         }
     }
     private boolean isHome(Activity a) throws Exception {
-        if(!a.hasWindowFocus() || a.isFinishing()) return false;
+        if(!a.hasWindowFocus() || a.isFinishing()) {trace("not focused or finishing");return false;}
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
-        if(km==null || km.isKeyguardLocked()) return false;
+        if(km==null || km.isKeyguardLocked()) {trace("keyguard active");return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
-        if(manager==null || !normalLauncherState(manager)) return false;
-        if(topOpen.invoke(null,a)!=null) return false;
+        if(manager==null || !normalLauncherState(manager)) {trace("not NORMAL launcher state");return false;}
+        if(topOpen.invoke(null,a)!=null) {trace("floating view open");return false;}
         return true;
     }
     /**
@@ -171,8 +180,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private View emptyPage(Activity a,float x,float y) throws Exception {
         if(!isHome(a)) return null;
         ViewGroup workspace=findWorkspace(a);
-        if(workspace==null)return null;
-        if(!hit(workspace,x,y))return null;
+        if(workspace==null) {trace("Workspace not found");return null;}
+        if(!hit(workspace,x,y)) {trace("touch outside Workspace bounds");return null;}
         try {
             if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition")))return null;
         } catch(NoSuchMethodError ignored) { /* removed by Launcher optimizer */ }
@@ -184,11 +193,19 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             for(int j=0;j<((ViewGroup)page).getChildCount();j++) {
                 View child=((ViewGroup)page).getChildAt(j);
                 if(containerClass.isInstance(child))grid=(ViewGroup)child;
-                else if(hit(child,x,y))return null;
+                // Decorative CellLayout overlays are allowed. Only interactive
+                // children outside the shortcut container block an empty tap.
+                else if(hit(child,x,y) && (child.isClickable() || child.isLongClickable())) {
+                    trace("interactive CellLayout overlay");
+                    return null;
+                }
             }
-            if(grid==null || !hit(grid,x,y))return null;
+            if(grid==null) {trace("ShortcutAndWidgetContainer missing");return null;}
+            // In Pixel Launcher the grid's clip rectangle can exclude the outer
+            // page padding; use CellLayout's visible bounds to judge emptiness.
+            // Still reject every actual icon/widget below.
             for(int j=0;j<grid.getChildCount();j++) {
-                if(hit(grid.getChildAt(j),x,y))return null;
+                if(hit(grid.getChildAt(j),x,y)) {trace("icon/widget hit");return null;}
             }
             // Exclude other visible workspace children on top of this page.
             for(int j=i+1;j<workspace.getChildCount();j++) {
@@ -204,14 +221,20 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     if(sibling==branch || !hit(sibling,x,y))continue;
                     String name=sibling.getClass().getName();
                     if(name.contains("Hotseat") || name.contains("Search") || name.contains("Smartspace")
-                            || name.contains("Qsb") || name.contains("QSB")) return null;
+                            || name.contains("Qsb") || name.contains("QSB")) {
+                        trace("hotseat/search region");return null;
+                    }
                     if(j>index && (sibling.isClickable() || sibling.isLongClickable()
-                            || floatingClass.isInstance(sibling)))return null;
+                            || floatingClass.isInstance(sibling))) {
+                        trace("intercepted by foreground overlay");return null;
+                    }
                 }
                 branch=parent;
             }
+            trace("empty workspace accepted");
             return page;
         }
+        trace("no matching CellLayout at touch");
         return null;
     }
     /**
@@ -266,6 +289,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         return x>=rect.left && x<rect.right && y>=rect.top && y<rect.bottom;
     }
     private void sleep(Activity a) {
+        trace("sleep action dispatched");
         if(!sleeping.compareAndSet(false,true))return;
         Context context=a.getApplicationContext();
         new Thread(()->{
