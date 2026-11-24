@@ -1,0 +1,70 @@
+name: Build stable-signed Pixel Launcher APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Install Android SDK 35
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -1)"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Test double-tap state machine
+        run: bash tests/run.sh
+      - name: Verify Android sources compile (debug APK not distributed)
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Load private stable-signing key
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.LAUNCHER_SIGNING_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.LAUNCHER_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$KEYSTORE_B64" || -z "$KEYSTORE_PASSWORD" ]]; then
+            echo '::error::Missing stable signing secrets. Configure LAUNCHER_SIGNING_KEYSTORE_B64 and LAUNCHER_SIGNING_PASSWORD in Repository settings > Secrets and variables > Actions.'
+            exit 1
+          fi
+          umask 077
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/launcherhook-signing.p12"
+          echo "LAUNCHER_SIGNING_KEYSTORE=$RUNNER_TEMP/launcherhook-signing.p12" >> "$GITHUB_ENV"
+          echo "LAUNCHER_SIGNING_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+      - name: Build stable-signed release
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Verify package signature and locked certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
+          EXPECTED=da11dc91385a561fb014911aac165a6ea7b501c353aa3147367dc769404c9709
+          if [[ "$ACTUAL" != "$EXPECTED" ]]; then
+            echo '::error::APK signing certificate differs from the fixed PixelLauncherHook key.'
+            exit 1
+          fi
+      - name: Clear signing key from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/launcherhook-signing.p12"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelLauncherHook-stable-signed-APK
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
