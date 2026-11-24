@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.4
+# Pixel Launcher Double Tap 1.5
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -60,3 +60,12 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - [AOSP Launcher.java（mWorkspace 与 getWorkspace）](https://android.googlesource.com/platform/packages/apps/Launcher3/+/250f92bbe00d219f82c573fbbc28eb12ba3ba61a/src/com/android/launcher3/Launcher.java)
 - [AOSP Launcher3 SettingsActivity.java（PreferenceScreen）](https://android.googlesource.com/platform/packages/apps/Launcher3/+/9367f98/src/com/android/launcher3/settings/SettingsActivity.java)
 - [AndroidX TwoStatePreference.java（onClick 与 setChecked）](https://android.googlesource.com/platform/frameworks/support/+/f2e05c341382db64d127118a13451dcaa554b702/preference/preference/src/main/java/androidx/preference/TwoStatePreference.java)
+
+## v1.5：修复原生开关布局并诊断双击识别
+
+- 参照 Pixel Launcher 主屏幕设置中**已有的原生开关**，复制其 Preference row/widget 布局参数，不再依赖手动实例化开关的默认布局。
+- 禁用空图标占位，使新设置项与其它设置项左对齐。
+- 用 `getPreference(int)` 的原始参数类型查找参考设置，兼容优化后的 AndroidX Preference。
+- 手势检测不再要求 ShortcutAndWidgetContainer 的裁剪区域覆盖全部页面留白；但仍拒绝点击图标、widget、热座和前景浮层。
+- 为实际用户设备增加去重日志 `[LauncherDoubleTap] Gesture trace:`，报告各判断路径，不记录触摸坐标。
+- 维持 `dev.local.launcherdoubletap` 包名、原签名证书及 LSPosed 推荐作用域，versionCode=6。
