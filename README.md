@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.6
+# Pixel Launcher Double Tap 1.7
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -75,3 +75,9 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 用户 v1.5 日志显示参考开关的实际类型为 `androidx.preference.SwitchPreference`，而新建项却为 `SwitchPreferenceCompat`。两者布局使用不同的 switch view ID，复用前者 widget layout 给后者导致滑块不能正常随点击更新。现在优先实例化与参考项完全相同的具体类，再复制其 row/widget 布局；没有匹配模板时避免复制错误布局。
 
 同一日志最后为 `Double tap lock disabled`，因此后续触摸不会进入双击识别。现在首次触摸时会在 LSPosed 日志记录 `double-tap setting is OFF`，便于辨别开关状态问题和手势识别问题。保持应用 ID、证书和推荐作用域，versionCode 7。
+
+## v1.7：修复 KernelSU 下 su 无法启动
+- 双击手势已通过真机日志确认，失败发生在 `ProcessBuilder("su", ...)` 找不到程序。
+- 新版按顺序尝试 `/system/bin/su`（KernelSU su-compat 常见路径）、`/system/xbin/su` 与 `su`，逐个记录根命令启动失败、退出代码、超时和成功情况。直接调用，不在执行前判断文件是否存在，因为 KernelSU 可能通过 execve 内核 Hook 提供该路径。
+- 如仍提示 `No usable su for Launcher UID`，需在 **KernelSU → Superuser** 显示系统应用并授权 `com.google.android.apps.nexuslauncher`，之后重启 Launcher。授予 Root 给 Launcher 会扩大该应用权限，应由用户自行权衡。
+- 原包名、原签名证书与推荐 LSPosed 作用域均不变。只在成功识别桌面空白双击后才尝试执行命令。
