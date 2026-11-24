@@ -128,7 +128,7 @@ final class LauncherSettingsHook {
         try {
             int count=((Number)XposedHelpers.callMethod(parent,"getPreferenceCount")).intValue();
             for(int i=0;i<count;i++) {
-                Object child=XposedHelpers.callMethod(parent,"getPreference",i);
+                Object child=XposedHelpers.callMethod(parent,"getPreference",new Class<?>[]{int.class},i);
                 if(child==null)continue;
                 if(twoState.isInstance(child)) {
                     // Reuse the actual working widget resource, not the default style of
