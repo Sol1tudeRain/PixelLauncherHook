@@ -106,7 +106,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     }
     private void reset(Activity a) { TapTracker t=trackers.get(a); if(t!=null)t.reset(); }
     private void observe(Activity a, MotionEvent e, XC_MethodHook.MethodHookParam p) throws Exception {
-        if (!LauncherSettingsHook.isEnabled(a)) { reset(a); return; }
+        if (!LauncherSettingsHook.isEnabled(a)) {
+            if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
+                trace("double-tap setting is OFF; gesture ignored");
+            reset(a);
+            return;
+        }
         TapTracker t=tracker(a);
         if (e.getPointerCount()!=1 || e.getToolType(0)!=MotionEvent.TOOL_TYPE_FINGER) {t.reset(); return;}
         float x=e.getRawX(),y=e.getRawY();

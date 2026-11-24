@@ -173,17 +173,30 @@ final class LauncherSettingsHook {
         if (screen == null || XposedHelpers.callMethod(screen, "findPreference", KEY) != null) return;
 
         // Follow Pixel Launcher's own Preference style, theme, fonts and switch layout.
-        Class<?> switchClass = XposedHelpers.findClassIfExists("androidx.preference.SwitchPreferenceCompat", loader);
-        if (switchClass == null) switchClass = XposedHelpers.findClass("androidx.preference.SwitchPreference", loader);
         Class<?> twoStateClass=XposedHelpers.findClassIfExists("androidx.preference.TwoStatePreference",loader);
         Object template=twoStateClass==null ? null : findNativeSwitch(screen,twoStateClass,loader,0);
+        // Use the SAME concrete preference class as the Launcher settings' own
+        // working switch. SwitchPreference uses android.R.id.switch_widget, while
+        // SwitchPreferenceCompat uses androidx.preference.R.id.switchWidget.
+        // Mixing them with a copied widget layout renders a visible but inert switch.
         Object toggle=null;
-        if(template!=null && switchClass.isAssignableFrom(template.getClass())) {
+        if(template!=null) {
             try { toggle=newSwitchPreference(template.getClass(),activity); }
             catch(Exception e) { XposedBridge.log(TAG+"Native switch constructor unavailable: "+e); }
         }
-        if(toggle==null) toggle=newSwitchPreference(switchClass,activity);
-        if(template!=null) copyNativePreferenceLayout(template,toggle);
+        if(toggle==null) {
+            // Fallback preserves the class/widget pairing rather than copying an
+            // incompatible widgetLayoutResId from some other subclass.
+            Class<?> switchClass=XposedHelpers.findClassIfExists("androidx.preference.SwitchPreference",loader);
+            if(switchClass==null) switchClass=XposedHelpers.findClass("androidx.preference.SwitchPreferenceCompat",loader);
+            toggle=newSwitchPreference(switchClass,activity);
+        }
+        if(template!=null && template.getClass()==toggle.getClass()) {
+            copyNativePreferenceLayout(template,toggle);
+        }
+        XposedBridge.log(TAG+"Preference widget pairing: template="+
+                (template==null ? "none" : template.getClass().getName())
+                +" actual="+toggle.getClass().getName());
         // No icon is supplied. Match Pixel Launcher's other settings rows (no empty
         // icon column), irrespective of the Preference default style.
         try { XposedHelpers.setBooleanField(toggle,"mIconSpaceReserved",false); }
