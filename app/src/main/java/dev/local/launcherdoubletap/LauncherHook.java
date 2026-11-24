@@ -12,6 +12,7 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import java.lang.reflect.Method;
+import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -27,6 +28,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private final WeakHashMap<Activity,TapTracker> trackers=new WeakHashMap<>();
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
+    private boolean loggedWorkspaceFailure;
     private Class<?> launcherClass, workspaceClass, cellClass, containerClass, floatingClass;
     private Object normalState;
     private Method topOpen;
@@ -168,9 +170,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     }
     private View emptyPage(Activity a,float x,float y) throws Exception {
         if(!isHome(a)) return null;
-        Object obj=XposedHelpers.callMethod(a,"getWorkspace");
-        if(!workspaceClass.isInstance(obj))return null;
-        ViewGroup workspace=(ViewGroup)obj;
+        ViewGroup workspace=findWorkspace(a);
+        if(workspace==null)return null;
         if(!hit(workspace,x,y))return null;
         try {
             if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition")))return null;
@@ -213,6 +214,49 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         }
         return null;
     }
+    /**
+     * AOSP Launcher3 keeps its Workspace in mWorkspace. Optimized Pixel Launcher
+     * builds can inline/remove getWorkspace(), as the device's LSPosed logs show.
+     * Retrieve the object by type/field and finally from the live view hierarchy.
+     * Only actual Workspace instances are accepted, never an arbitrary empty view.
+     */
+    private ViewGroup findWorkspace(Activity activity) {
+        try {
+            Object v=XposedHelpers.getObjectField(activity, "mWorkspace");
+            if(workspaceClass.isInstance(v))return (ViewGroup)v;
+        } catch (NoSuchFieldError ignored) { }
+        for(Class<?> c=activity.getClass();c!=null;c=c.getSuperclass()) {
+            for(Field f:c.getDeclaredFields()) {
+                if(!workspaceClass.isAssignableFrom(f.getType()))continue;
+                try {
+                    f.setAccessible(true);
+                    Object v=f.get(activity);
+                    if(workspaceClass.isInstance(v))return (ViewGroup)v;
+                } catch(Throwable ignored) { }
+            }
+        }
+        try {
+            View root=activity.getWindow().getDecorView();
+            return findWorkspaceView(root,0);
+        } catch(Throwable ignored) { }
+        if(!loggedWorkspaceFailure) {
+            loggedWorkspaceFailure=true;
+            XposedBridge.log(TAG+"No Workspace field/view found on "+activity.getClass().getName());
+        }
+        return null;
+    }
+
+    private ViewGroup findWorkspaceView(View node,int depth) {
+        if(workspaceClass.isInstance(node))return (ViewGroup)node;
+        if(!(node instanceof ViewGroup) || depth>24)return null;
+        ViewGroup parent=(ViewGroup)node;
+        for(int i=0;i<parent.getChildCount();i++) {
+            ViewGroup result=findWorkspaceView(parent.getChildAt(i),depth+1);
+            if(result!=null)return result;
+        }
+        return null;
+    }
+
     private boolean hit(View v,float x,float y) {
         // getGlobalVisibleRect uses root coordinates, whereas MotionEvent raw uses screen coordinates.
         if(!v.isShown() || v.getAlpha()<=0.01f || !v.getGlobalVisibleRect(rect))return false;
