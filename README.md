@@ -48,3 +48,5 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 
 ## v1.3 修复
 针对 PixelOS 真机日志：`StateManager#getState()` 缺失与 `SwitchPreferenceCompat#setPersistent(boolean)` 缺失。优先采用 `isInStableState` 或字段检查，移除不兼容的 `setPersistent` 调用，并兼容其它可优化的 Preference setter。保留原包名、LSPosed 作用域与相同发布签名。
+
+<!-- v1.3 workflow verification -->
