@@ -1,4 +1,4 @@
-name: Build stable-signed Pixel Launcher APK
+name: Build Pixel Launcher APK
 on:
   workflow_dispatch:
   push:
@@ -27,26 +27,29 @@ jobs:
           "$SDKMANAGER" 'platforms;android-35' 'build-tools;35.0.0'
       - name: Test double-tap state machine
         run: bash tests/run.sh
-      - name: Verify Android sources compile (debug APK not distributed)
+      - name: Verify Android sources compile
         run: gradle --no-daemon :app:assembleDebug
-      - name: Load private stable-signing key
+      - name: Load optional stable-signing key
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.LAUNCHER_SIGNING_KEYSTORE_B64 }}
           KEYSTORE_PASSWORD: ${{ secrets.LAUNCHER_SIGNING_PASSWORD }}
         run: |
           set -euo pipefail
-          if [[ -z "$KEYSTORE_B64" || -z "$KEYSTORE_PASSWORD" ]]; then
-            echo '::error::Missing stable signing secrets. Configure LAUNCHER_SIGNING_KEYSTORE_B64 and LAUNCHER_SIGNING_PASSWORD in Repository settings > Secrets and variables > Actions.'
-            exit 1
+          if [[ -n "$KEYSTORE_B64" && -n "$KEYSTORE_PASSWORD" ]]; then
+            umask 077
+            printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/launcherhook-signing.p12"
+            echo "LAUNCHER_SIGNING_KEYSTORE=$RUNNER_TEMP/launcherhook-signing.p12" >> "$GITHUB_ENV"
+            echo "LAUNCHER_SIGNING_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "STABLE_SIGNING=true" >> "$GITHUB_ENV"
+          else
+            echo 'Private signing secrets absent; publish unsigned build for local fixed-key signing.'
+            echo "STABLE_SIGNING=false" >> "$GITHUB_ENV"
           fi
-          umask 077
-          printf '%s' "$KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/launcherhook-signing.p12"
-          echo "LAUNCHER_SIGNING_KEYSTORE=$RUNNER_TEMP/launcherhook-signing.p12" >> "$GITHUB_ENV"
-          echo "LAUNCHER_SIGNING_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-      - name: Build stable-signed release
+      - name: Build release
         run: gradle --no-daemon :app:assembleRelease
-      - name: Verify package signature and locked certificate
+      - name: Verify stable signing certificate
+        if: env.STABLE_SIGNING == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -57,14 +60,32 @@ jobs:
           ACTUAL="$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n 1)"
           EXPECTED=da11dc91385a561fb014911aac165a6ea7b501c353aa3147367dc769404c9709
           if [[ "$ACTUAL" != "$EXPECTED" ]]; then
-            echo '::error::APK signing certificate differs from the fixed PixelLauncherHook key.'
+            echo '::error::APK certificate does not match the locked v1.1 signing key.'
             exit 1
           fi
-      - name: Clear signing key from runner
-        if: always()
-        run: rm -f "$RUNNER_TEMP/launcherhook-signing.p12"
-      - uses: actions/upload-artifact@v4
+      - name: Upload stable-signed APK
+        if: env.STABLE_SIGNING == 'true'
+        uses: actions/upload-artifact@v4
         with:
           name: PixelLauncherHook-stable-signed-APK
           path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+      - name: Collect unsigned APK for private local signing
+        if: env.STABLE_SIGNING != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-transfer
+          cp app/build/outputs/apk/release/app-release-unsigned.apk build-transfer/unsigned.apk
+          cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" build-transfer/apksigner.jar
+          cp "$ANDROID_HOME/build-tools/35.0.0/zipalign" build-transfer/zipalign
+      - name: Upload unsigned APK and signing tools
+        if: env.STABLE_SIGNING != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelLauncherHook-unsigned-build
+          path: build-transfer/
+          if-no-files-found: error
+      - name: Clear signing key from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/launcherhook-signing.p12"
