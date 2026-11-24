@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.3
+# Pixel Launcher Double Tap 1.4
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -48,3 +48,15 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 
 ## v1.3 修复
 针对 PixelOS 真机日志：`StateManager#getState()` 缺失与 `SwitchPreferenceCompat#setPersistent(boolean)` 缺失。优先采用 `isInStableState` 或字段检查，移除不兼容的 `setPersistent` 调用，并兼容其它可优化的 Preference setter。保留原包名、LSPosed 作用域与相同发布签名。
+
+## v1.4：根据 Launcher3 与 AndroidX 源码重构
+
+- **桌面对象**：Launcher3 中 `Launcher#getWorkspace()` 只是返回 `mWorkspace`。PixelOS 真机这个 getter 被优化掉，因此优先读取 `mWorkspace`，再按 Workspace 字段类型查找，最后只在当前 DecorView 视图树中寻找真正的 `Workspace` 实例；不再调用缺失的 `getWorkspace()` 方法。
+- **开关保存**：AndroidX `TwoStatePreference.onClick()` 会调用 `setChecked()`。因此直接 Hook `TwoStatePreference.setChecked`，仅处理本模块动态加入的开关，不再查找不存在的 `Preference$OnPreferenceChangeListener`。
+- **安全边界**：只在正常桌面、无浮层和空白网格双击时尝试锁屏；找不到 Workspace 时保持无操作。继续使用固定证书及原包名，推荐作用域仍然是 Pixel Launcher。
+- **来源区别**：参考 PixelOS 公开的 Launcher3/AOSP Launcher3 实现，但设备实际运行的是优化后的 Pixel Launcher APK，因此不能把开源 API 名称视为运行时保证。
+
+参考资料：
+- [AOSP Launcher.java（mWorkspace 与 getWorkspace）](https://android.googlesource.com/platform/packages/apps/Launcher3/+/250f92bbe00d219f82c573fbbc28eb12ba3ba61a/src/com/android/launcher3/Launcher.java)
+- [AOSP Launcher3 SettingsActivity.java（PreferenceScreen）](https://android.googlesource.com/platform/packages/apps/Launcher3/+/9367f98/src/com/android/launcher3/settings/SettingsActivity.java)
+- [AndroidX TwoStatePreference.java（onClick 与 setChecked）](https://android.googlesource.com/platform/frameworks/support/+/f2e05c341382db64d127118a13451dcaa554b702/preference/preference/src/main/java/androidx/preference/TwoStatePreference.java)
