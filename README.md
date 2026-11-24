@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.1
+# Pixel Launcher Double Tap 1.2
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -40,3 +40,8 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - Hook Pixel Launcher 进程里 AndroidX `PreferenceFragmentCompat.onViewCreated`，仅对 Launcher 设置首页插入原生 `SwitchPreferenceCompat`；沿用 Launcher 自己的设置页面主题，非截图/覆盖层。
 - 开关使用 Launcher 进程自身的私有 `SharedPreferences(launcher_double_tap_settings)` 保存；手势处理时直接读取，关闭立即生效。
 - 若 PixelOS 内置 Launcher 的设置页面类或 AndroidX 实现有变化，可能不会出现开关。请提供 LSPosed 日志（`[LauncherDoubleTap]`）和 Launcher APK 版本以便适配。
+## v1.2 修复（依据 PixelOS 真机 LSPosed 日志）
+- 修复正常桌面识别：不再调用缺失的 Launcher#isInState，改用 StateManager#getState 与 NORMAL 比较。
+- 修复主屏幕设置开关创建：优先使用 SwitchPreferenceCompat(Context, AttributeSet) 反射构造方法，兼容无单 Context 构造函数的 Launcher。
+- 保持原 applicationId、推荐 LSPosed 作用域和固定证书 SHA-256，提升 versionCode 至 3，可覆盖 v1.1。
+- 没有提供签名 secrets 的 Actions 运行将上传未签名 APK，供本地使用备份签名密钥签名。
