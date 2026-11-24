@@ -128,10 +128,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(!a.hasWindowFocus() || a.isFinishing()) return false;
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) return false;
-        if(!Boolean.TRUE.equals(XposedHelpers.callMethod(a,"isInState",normalState))) return false;
-        if(topOpen.invoke(null,a)!=null) return false;
+        // PixelOS Launcher does not expose isInState(LauncherState) at this class level.
+        // StateManager#getState() is the actual stable Launcher3 API.
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
+        if(manager==null || XposedHelpers.callMethod(manager,"getState")!=normalState) return false;
         if(Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInTransition"))) return false;
+        if(topOpen.invoke(null,a)!=null) return false;
         return true;
     }
     private View emptyPage(Activity a,float x,float y) throws Exception {

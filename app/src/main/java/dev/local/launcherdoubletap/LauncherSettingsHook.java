@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.util.AttributeSet;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.util.Locale;
@@ -52,6 +54,30 @@ final class LauncherSettingsHook {
         XposedBridge.log(TAG + "Home settings hook installed");
     }
 
+    /**
+     * Resolve the runtime AndroidX constructor explicitly. Some PixelOS Launcher builds
+     * optimize away the one-Context overload, leaving only Context+AttributeSet.
+     * Use the two-argument overload first so the Launcher's theme supplies its style.
+     */
+    private static Object newSwitchPreference(Class<?> cls, Context context) throws Exception {
+        try {
+            Constructor<?> c = cls.getDeclaredConstructor(Context.class, AttributeSet.class);
+            c.setAccessible(true);
+            return c.newInstance(context, null);
+        } catch (NoSuchMethodException ignored) { }
+        try {
+            Constructor<?> c = cls.getDeclaredConstructor(Context.class, AttributeSet.class, int.class);
+            c.setAccessible(true);
+            return c.newInstance(context, null, 0);
+        } catch (NoSuchMethodException ignored) { }
+        try {
+            Constructor<?> c = cls.getDeclaredConstructor(Context.class, AttributeSet.class, int.class, int.class);
+            c.setAccessible(true);
+            return c.newInstance(context, null, 0, 0);
+        } catch (NoSuchMethodException ignored) { }
+        throw new NoSuchMethodException(cls.getName() + " lacks a usable Context/AttributeSet constructor");
+    }
+
     private static void addSwitch(Object fragment, ClassLoader loader) throws Exception {
         Activity activity = (Activity) XposedHelpers.callMethod(fragment, "getActivity");
         if (activity == null || !"com.google.android.apps.nexuslauncher".equals(activity.getPackageName())) return;
@@ -68,7 +94,7 @@ final class LauncherSettingsHook {
         // Follow Pixel Launcher's own Preference style, theme, fonts and switch layout.
         Class<?> switchClass = XposedHelpers.findClassIfExists("androidx.preference.SwitchPreferenceCompat", loader);
         if (switchClass == null) switchClass = XposedHelpers.findClass("androidx.preference.SwitchPreference", loader);
-        Object toggle = XposedHelpers.newInstance(switchClass, activity);
+        Object toggle = newSwitchPreference(switchClass, activity);
         boolean chinese = Locale.getDefault().getLanguage().equals("zh");
         XposedHelpers.callMethod(toggle, "setKey", KEY);
         XposedHelpers.callMethod(toggle, "setPersistent", false);
