@@ -306,11 +306,40 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         return;
                     } catch(Throwable e) {XposedBridge.log(TAG+"Direct sleep unavailable; using root");}
                 }
-                Process proc=new ProcessBuilder("su","-c","/system/bin/input keyevent 223").redirectErrorStream(true).start();
-                if(!proc.waitFor(60,java.util.concurrent.TimeUnit.SECONDS)) {
-                    proc.destroy(); XposedBridge.log(TAG+"Root request timed out");
-                } else if(proc.exitValue()!=0) XposedBridge.log(TAG+"Sleep failed; check launcher root permission, exit="+proc.exitValue());
-                else XposedBridge.log(TAG+"Sleep key sent");
+                // KernelSU's su-compat implementation intercepts execve of
+                // /system/bin/su for allowed app UIDs, even when a normal
+                // filesystem stat/exists check reports ENOENT. Do not use only
+                // ProcessBuilder("su"), which depends on the Launcher PATH.
+                String[] commands={"/system/bin/su","/system/xbin/su","su"};
+                boolean completed=false;
+                for(String command:commands) {
+                    Process proc;
+                    try {
+                        proc=new ProcessBuilder(command,"-c","/system/bin/input keyevent 223")
+                                .redirectErrorStream(true).start();
+                    } catch(java.io.IOException e) {
+                        XposedBridge.log(TAG+"su launch failed ("+command+"): "+e.getMessage());
+                        continue;
+                    }
+                    if(!proc.waitFor(10,java.util.concurrent.TimeUnit.SECONDS)) {
+                        proc.destroyForcibly();
+                        XposedBridge.log(TAG+"su timed out ("+command+"); check KernelSU authorization");
+                        continue;
+                    }
+                    int exitCode=proc.exitValue();
+                    if(exitCode==0) {
+                        XposedBridge.log(TAG+"Sleep key sent via "+command);
+                        completed=true;
+                        break;
+                    }
+                    XposedBridge.log(TAG+"su returned exit="+exitCode+" ("+command
+                            +"); check KernelSU Superuser profile for Pixel Launcher");
+                }
+                if(!completed) {
+                    XposedBridge.log(TAG+"No usable su for Launcher UID; enable "
+                            +"com.google.android.apps.nexuslauncher in KernelSU Superuser "
+                            +"or use an alternative privileged sleep service");
+                }
             } catch(Throwable e) {XposedBridge.log(TAG+"Sleep failed: "+e);}
             finally {sleeping.set(false);}
         },"LauncherDoubleTap-sleep").start();
