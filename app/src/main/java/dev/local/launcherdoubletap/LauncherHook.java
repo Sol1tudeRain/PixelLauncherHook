@@ -128,13 +128,43 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(!a.hasWindowFocus() || a.isFinishing()) return false;
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) return false;
-        // PixelOS Launcher does not expose isInState(LauncherState) at this class level.
-        // StateManager#getState() is the actual stable Launcher3 API.
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
-        if(manager==null || XposedHelpers.callMethod(manager,"getState")!=normalState) return false;
-        if(Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInTransition"))) return false;
+        if(manager==null || !normalLauncherState(manager)) return false;
         if(topOpen.invoke(null,a)!=null) return false;
         return true;
+    }
+    /**
+     * PixelOS' optimized Launcher strips some StateManager accessor methods. Prefer
+     * isInStableState(), then use its actual state fields. Never assume NORMAL if
+     * no state can be verified (avoids sleeping in All Apps and Recents).
+     */
+    private boolean normalLauncherState(Object manager) {
+        try {
+            return Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInStableState",normalState));
+        } catch (NoSuchMethodError ignored) { }
+        try {
+            Object active=XposedHelpers.getObjectField(manager,"mState");
+            if(active!=normalState) return false;
+            try {
+                Object stable=XposedHelpers.getObjectField(manager,"mCurrentStableState");
+                if(stable!=normalState) return false;
+            } catch(NoSuchFieldError ignored) { }
+            try {
+                if(Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInTransition"))) return false;
+            } catch(NoSuchMethodError ignored) { }
+            return true;
+        } catch(NoSuchFieldError ignored) { }
+        // Optional public accessor, retained in some variants.
+        try {
+            Object stable=XposedHelpers.callMethod(manager,"getCurrentStableState");
+            if(stable!=normalState) return false;
+            try {
+                if(Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInTransition"))) return false;
+            } catch(NoSuchMethodError ignored) { }
+            return true;
+        } catch(NoSuchMethodError ignored) { }
+        report(new NoSuchMethodError("No supported Pixel Launcher state API or mState field in "+manager.getClass().getName()));
+        return false;
     }
     private View emptyPage(Activity a,float x,float y) throws Exception {
         if(!isHome(a)) return null;
@@ -142,7 +172,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(!workspaceClass.isInstance(obj))return null;
         ViewGroup workspace=(ViewGroup)obj;
         if(!hit(workspace,x,y))return null;
-        if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition")))return null;
+        try {
+            if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition")))return null;
+        } catch(NoSuchMethodError ignored) { /* removed by Launcher optimizer */ }
         // The visible workspace may have multiple pages on large displays.
         for(int i=0;i<workspace.getChildCount();i++) {
             View page=workspace.getChildAt(i);
