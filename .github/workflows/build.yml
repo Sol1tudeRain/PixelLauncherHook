@@ -31,7 +31,27 @@ jobs:
         run: bash tests/run.sh
       - name: Verify Android sources compile (debug APK not distributed)
         run: gradle --no-daemon :app:assembleDebug
+      - name: Build unsigned release for local signing
+        if: github.event_name == 'pull_request'
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Collect unsigned APK and signer
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-transfer
+          cp app/build/outputs/apk/release/app-release-unsigned.apk build-transfer/unsigned.apk
+          cp "$ANDROID_HOME/build-tools/35.0.0/lib/apksigner.jar" build-transfer/apksigner.jar
+          cp "$ANDROID_HOME/build-tools/35.0.0/zipalign" build-transfer/zipalign
+      - name: Upload unsigned APK for private local signing
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelLauncherHook-unsigned-build
+          path: build-transfer/
+          if-no-files-found: error
       - name: Load private stable-signing key
+        if: github.event_name != 'pull_request'
         shell: bash
         env:
           KEYSTORE_B64: ${{ secrets.LAUNCHER_SIGNING_KEYSTORE_B64 }}
@@ -47,8 +67,10 @@ jobs:
           echo "LAUNCHER_SIGNING_KEYSTORE=$RUNNER_TEMP/launcherhook-signing.p12" >> "$GITHUB_ENV"
           echo "LAUNCHER_SIGNING_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
       - name: Build stable-signed release
+        if: github.event_name != 'pull_request'
         run: gradle --no-daemon :app:assembleRelease
       - name: Verify package signature and locked certificate
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
@@ -66,6 +88,7 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/launcherhook-signing.p12"
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: PixelLauncherHook-stable-signed-APK
           path: app/build/outputs/apk/release/app-release.apk
