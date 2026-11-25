@@ -8,6 +8,8 @@ import android.graphics.Rect;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.view.MotionEvent;
+import android.view.InputEvent;
+import android.os.Looper;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
@@ -29,6 +31,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private final WeakHashMap<Activity,TapTracker> trackers=new WeakHashMap<>();
     private final WeakHashMap<Activity,Long> lastResumeTimes=new WeakHashMap<>();
     private static final long HOME_RESUME_GRACE_MS=1200;
+    // Short-lived pre-focus input handoff while Quickstep returns to home.
+    private static final long EARLY_INPUT_WINDOW_MS=2000;
+    private Activity resumedLauncher;
+    private long monitoredDownTime=-1, monitoredEventTime=-1;
+    private int monitoredAction=-1;
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
@@ -64,7 +71,14 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 @Override protected void beforeHookedMethod(MethodHookParam param) {
                     if (!launcherClass.isInstance(param.thisObject)) return;
                     Activity a=(Activity)param.thisObject;
-                    try { observe(a,(MotionEvent)param.args[0],param); }
+                    try {
+                        MotionEvent event=(MotionEvent)param.args[0];
+                        // The system gesture monitor can see a touch shortly before
+                        // the Launcher window takes focus. Never count it twice.
+                        if(isMonitoredDuplicate(event))return;
+                        if(!a.hasWindowFocus())return;
+                        observe(a,event,param,false);
+                    }
                     catch(Throwable e) { reset(a); report(e); }
                 }
                 @Override protected void afterHookedMethod(MethodHookParam param) {
@@ -79,18 +93,74 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             XposedBridge.hookMethod(Activity.class.getDeclaredMethod("onResume"),new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam p) {
                     if(launcherClass.isInstance(p.thisObject)) {
-                        lastResumeTimes.put((Activity)p.thisObject,SystemClock.uptimeMillis());
+                        Activity a=(Activity)p.thisObject;
+                        lastResumeTimes.put(a,SystemClock.uptimeMillis());
+                        resumedLauncher=a;
                         trace("Launcher resumed; recent-home gesture window active");
                     }
                 }
             });
             XposedBridge.hookMethod(Activity.class.getDeclaredMethod("onPause"),new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    if (launcherClass.isInstance(p.thisObject)) reset((Activity)p.thisObject);
+                    if (launcherClass.isInstance(p.thisObject)) {
+                        Activity a=(Activity)p.thisObject;
+                        reset(a);
+                        if(resumedLauncher==a)resumedLauncher=null;
+                    }
                 }
             });
             XposedBridge.log(TAG+"Hook installed: "+dispatch);
+            installQuickstepInputHook(cl);
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
+    }
+    /**
+     * Quickstep already owns a system gesture input monitor. It receives
+     * whole-display MotionEvents and filters navigation regions later in
+     * TouchInteractionService.onInputEvent. Observe, never consume or alter
+     * these events, and only while returning to a visible unfocused home.
+     */
+    private void installQuickstepInputHook(ClassLoader cl) {
+        try {
+            Class<?> tis=XposedHelpers.findClass(
+                    "com.android.quickstep.TouchInteractionService",cl);
+            Method input=tis.getDeclaredMethod("onInputEvent",InputEvent.class);
+            XposedBridge.hookMethod(input,new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if(!(p.args[0] instanceof MotionEvent))return;
+                    try { observeQuickstepInput((MotionEvent)p.args[0]); }
+                    catch(Throwable e) {report(e);}
+                }
+            });
+            XposedBridge.log(TAG+"Quickstep pre-focus input hook installed: "+input);
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Quickstep pre-focus input unavailable: "+e);
+        }
+    }
+    private boolean isMonitoredDuplicate(MotionEvent e) {
+        return e.getDownTime()==monitoredDownTime
+                && e.getEventTime()==monitoredEventTime
+                && e.getActionMasked()==monitoredAction;
+    }
+    private void observeQuickstepInput(MotionEvent e) throws Exception {
+        // TouchInteractionService normally uses the Launcher main looper;
+        // do not access View hierarchy or the TapTracker from other threads.
+        if(Looper.myLooper()!=Looper.getMainLooper())return;
+        Activity a=resumedLauncher;
+        if(a==null || a.hasWindowFocus() || a.isFinishing())return;
+        Long last=lastResumeTimes.get(a);
+        if(last==null)return;
+        long age=SystemClock.uptimeMillis()-last;
+        if(age<0 || age>EARLY_INPUT_WINDOW_MS)return;
+        if(!LauncherSettingsHook.isEnabled(a))return;
+        if(!isHome(a,true))return;
+        // Only mark accepted pre-focus events: normal window dispatch may
+        // still receive the same MotionEvent during a focus handoff.
+        monitoredDownTime=e.getDownTime();
+        monitoredEventTime=e.getEventTime();
+        monitoredAction=e.getActionMasked();
+        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
+            trace("Quickstep touch received before Launcher window focus");
+        observe(a,e,null,true);
     }
     private static Method findDispatch(Class<?> c) throws NoSuchMethodException {
         for (;c!=null;c=c.getSuperclass()) {
@@ -115,7 +185,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         return t;
     }
     private void reset(Activity a) { TapTracker t=trackers.get(a); if(t!=null)t.reset(); }
-    private void observe(Activity a, MotionEvent e, XC_MethodHook.MethodHookParam p) throws Exception {
+    private void observe(Activity a, MotionEvent e, XC_MethodHook.MethodHookParam p,
+                         boolean prefocus) throws Exception {
         if (!LauncherSettingsHook.isEnabled(a)) {
             if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
                 trace("double-tap setting is OFF; gesture ignored");
@@ -127,8 +198,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         float x=e.getRawX(),y=e.getRawY();
         switch(e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                trace("Launcher receives touch events");
-                t.start(e.getEventTime(),x,y,emptyPage(a,x,y)); break;
+                if(!prefocus)trace("Launcher receives touch events");
+                t.start(e.getEventTime(),x,y,emptyPage(a,x,y,prefocus)); break;
             case MotionEvent.ACTION_MOVE:
                 if(t.isDown()) {
                     for(int i=0;i<e.getHistorySize();i++) {
@@ -139,10 +210,17 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 break;
             case MotionEvent.ACTION_UP:
                 if(t.isDown()) {
-                    View page=emptyPage(a,x,y);
+                    View page=emptyPage(a,x,y,prefocus);
                     if(t.finish(e.getEventTime(),x,y,page)) {
-                        p.setObjectExtra("launcherDoubleTap",true);
-                        trace("DOUBLE TAP ACCEPTED");
+                        if(prefocus) {
+                            if(isHome(a,true)) {
+                                trace("Quickstep pre-focus DOUBLE TAP ACCEPTED");
+                                sleep(a);
+                            }
+                        } else {
+                            p.setObjectExtra("launcherDoubleTap",true);
+                            trace("DOUBLE TAP ACCEPTED");
+                        }
                     } else if(t.hasPrevious()) {
                         trace("first tap armed for double tap");
                     } else {
@@ -157,8 +235,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             default: break;
         }
     }
-    private boolean isHome(Activity a) throws Exception {
-        if(!a.hasWindowFocus() || a.isFinishing()) {trace("not focused or finishing");return false;}
+    private boolean isHome(Activity a) throws Exception {return isHome(a,false);}
+    private boolean isHome(Activity a,boolean prefocus) throws Exception {
+        if(a.isFinishing() || (!prefocus && !a.hasWindowFocus())
+                || (prefocus && a.hasWindowFocus())) {
+            trace("not focused or finishing");return false;
+        }
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) {trace("keyguard active");return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
@@ -226,8 +308,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         } catch(NoSuchMethodError ignored) { }
         return true;
     }
-    private View emptyPage(Activity a,float x,float y) throws Exception {
-        if(!isHome(a)) return null;
+    private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
+        if(!isHome(a,prefocus)) return null;
         ViewGroup workspace=findWorkspace(a);
         if(workspace==null) {trace("Workspace not found");return null;}
         if(!hit(workspace,x,y)) {trace("touch outside Workspace bounds");return null;}
