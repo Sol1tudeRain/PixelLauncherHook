@@ -106,11 +106,13 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         Activity a=(Activity)p.thisObject;
                         reset(a);
                         if(resumedLauncher==a)resumedLauncher=null;
+                        lastQuickstepHomeTargetAt=-1;
                     }
                 }
             });
             XposedBridge.log(TAG+"Hook installed: "+dispatch);
             installQuickstepInputHook(cl);
+            installQuickstepHomeTargetHook(cl);
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
     }
     /**
@@ -125,6 +127,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private final WeakHashMap<Object,Boolean> selectedMonitorReceivers=new WeakHashMap<>();
     private int discoveredReceiverCount;
     private int quickstepEventDiagnostics;
+    private long lastQuickstepHomeTargetAt=-1;
+    private static final long QUICKSTEP_HOME_TARGET_MAX_AGE_MS=2400;
     private void installQuickstepInputHook(ClassLoader cl) {
         try {
             Class<?> wrapper=XposedHelpers.findClass(
@@ -230,6 +234,37 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         XposedBridge.log(TAG+"Quickstep swipe-up BatchedInputEventReceiver hook installed: "
                 +receiverClass.getName()+" methods="+hooked);
     }
+    /**
+     * GestureState records whether the swipe's actual destination is HOME.
+     * The launcher StateManager can remain BACKGROUND_APP and expose no
+     * targetState while Quickstep's app-closing animation is still running.
+     * Do not guess that a resume implies home; require a real HOME gesture.
+     */
+    private void installQuickstepHomeTargetHook(ClassLoader cl) {
+        try {
+            Class<?> gs=XposedHelpers.findClass("com.android.quickstep.GestureState",cl);
+            int count=XposedBridge.hookAllMethods(gs,"setEndTarget",new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if(p.args.length==0 || p.args[0]==null)return;
+                    String target=String.valueOf(p.args[0]);
+                    if("HOME".equals(target)) {
+                        lastQuickstepHomeTargetAt=SystemClock.uptimeMillis();
+                        trace("Quickstep gesture destination HOME confirmed");
+                    } else {
+                        lastQuickstepHomeTargetAt=-1;
+                    }
+                }
+            }).size();
+            XposedBridge.log(TAG+"Quickstep gesture end-target hooks="+count);
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Quickstep gesture destination hook unavailable: "+e);
+        }
+    }
+    private boolean hasRecentQuickstepHomeTarget() {
+        long age=SystemClock.uptimeMillis()-lastQuickstepHomeTargetAt;
+        return lastQuickstepHomeTargetAt>=0 && age>=0
+                && age<=QUICKSTEP_HOME_TARGET_MAX_AGE_MS;
+    }
     private boolean isMonitoredDuplicate(MotionEvent e) {
         return e.getDownTime()==monitoredDownTime
                 && e.getEventTime()==monitoredEventTime
@@ -249,7 +284,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(e.getActionMasked()==MotionEvent.ACTION_DOWN && quickstepEventDiagnostics++<16) {
             XposedBridge.log(TAG+"Quickstep input gate: resumed="+(a!=null)
                 +" ageMs="+(age==Long.MAX_VALUE?"unknown":age)
-                +" focused="+focused+" action=DOWN");
+                +" focused="+focused+" homeGesture="+hasRecentQuickstepHomeTarget()
+                +" action=DOWN");
         }
         if(a==null || focused || a.isFinishing())return;
         if(age<0 || age>EARLY_INPUT_WINDOW_MS)return;
@@ -394,7 +430,14 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             trace("Quickstep early home: state transitioning toward NORMAL");
             return true;
         }
-        if(prefocus)trace("Quickstep early state rejected: no confirmed NORMAL target");
+        // Quickstep's HOME gesture is a stronger indication of the actual
+        // destination than a nullable/optimized StateManager target. Only
+        // the currently resumed, unfocused launcher can use this exemption.
+        if(prefocus && target==null && hasRecentQuickstepHomeTarget()) {
+            trace("Quickstep early home: confirmed HOME gesture while launcher state lags");
+            return true;
+        }
+        if(prefocus)trace("Quickstep early state rejected: no confirmed NORMAL/HOME target");
         return false;
     }
     private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
