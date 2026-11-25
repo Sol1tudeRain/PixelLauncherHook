@@ -27,6 +27,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private static final String TARGET="com.google.android.apps.nexuslauncher";
     private static final String TAG="[LauncherDoubleTap] ";
     private final WeakHashMap<Activity,TapTracker> trackers=new WeakHashMap<>();
+    private final WeakHashMap<Activity,Long> lastResumeTimes=new WeakHashMap<>();
+    private static final long HOME_RESUME_GRACE_MS=1200;
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
@@ -71,6 +73,14 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                             Activity a=(Activity)param.thisObject;
                             if (isHome(a)) sleep(a);
                         } catch(Throwable e) { report(e); }
+                    }
+                }
+            });
+            XposedBridge.hookMethod(Activity.class.getDeclaredMethod("onResume"),new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    if(launcherClass.isInstance(p.thisObject)) {
+                        lastResumeTimes.put((Activity)p.thisObject,SystemClock.uptimeMillis());
+                        trace("Launcher resumed; recent-home gesture window active");
                     }
                 }
             });
@@ -128,10 +138,17 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 }
                 break;
             case MotionEvent.ACTION_UP:
-                if(t.isDown() && t.finish(e.getEventTime(),x,y,emptyPage(a,x,y))) {
-                    p.setObjectExtra("launcherDoubleTap",true);
-                    trace("DOUBLE TAP ACCEPTED");
-                } else if(t.isDown()) t.reset();
+                if(t.isDown()) {
+                    View page=emptyPage(a,x,y);
+                    if(t.finish(e.getEventTime(),x,y,page)) {
+                        p.setObjectExtra("launcherDoubleTap",true);
+                        trace("DOUBLE TAP ACCEPTED");
+                    } else if(t.hasPrevious()) {
+                        trace("first tap armed for double tap");
+                    } else {
+                        trace("tap discarded on finger lift");
+                    }
+                }
                 break;
             case MotionEvent.ACTION_CANCEL:
             case MotionEvent.ACTION_POINTER_DOWN:
@@ -215,8 +232,22 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(workspace==null) {trace("Workspace not found");return null;}
         if(!hit(workspace,x,y)) {trace("touch outside Workspace bounds");return null;}
         try {
-            if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition")))return null;
-        } catch(NoSuchMethodError ignored) { /* removed by Launcher optimizer */ }
+            if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition"))) {
+                // A returning Launcher may already be NORMAL and have focus
+                // while PagedView still reports a page transition. During
+                // a short window after Activity.onResume, we can accept
+                // stationary blank taps; TapTracker still cancels swipes,
+                // icon/widget hits, multi-touch and gestures on overlays.
+                Long resumedAt=lastResumeTimes.get(a);
+                long age=resumedAt==null ? Long.MAX_VALUE
+                        : SystemClock.uptimeMillis()-resumedAt;
+                if(age<0 || age>HOME_RESUME_GRACE_MS) {
+                    trace("Workspace page transition blocks tap outside home-resume window");
+                    return null;
+                }
+                trace("Workspace transition bypassed during recent home resume");
+            }
+        } catch(NoSuchMethodError ignored) { /* optimized Pixel Launcher */ }
         // The visible workspace may have multiple pages on large displays.
         for(int i=0;i<workspace.getChildCount();i++) {
             View page=workspace.getChildAt(i);
