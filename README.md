@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.6
+# Pixel Launcher Double Tap 1.7
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -75,3 +75,13 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 用户 v1.5 日志显示参考开关的实际类型为 `androidx.preference.SwitchPreference`，而新建项却为 `SwitchPreferenceCompat`。两者布局使用不同的 switch view ID，复用前者 widget layout 给后者导致滑块不能正常随点击更新。现在优先实例化与参考项完全相同的具体类，再复制其 row/widget 布局；没有匹配模板时避免复制错误布局。
 
 同一日志最后为 `Double tap lock disabled`，因此后续触摸不会进入双击识别。现在首次触摸时会在 LSPosed 日志记录 `double-tap setting is OFF`，便于辨别开关状态问题和手势识别问题。保持应用 ID、证书和推荐作用域，versionCode 7。
+
+## v1.7：返回桌面立即支持双击锁屏
+
+- 修复返回桌面后需要等状态动画结束才允许双击的问题。Launcher3 的 `StateManager.isInStableState(NORMAL)` 要求 `mCurrentStableState` 也为 `NORMAL`，但它只在动画结束后更新；直接观察 `mState` 可确认当前已进入桌面。
+- 只允许当前 `mState == NORMAL`，并且若能读取动画目标 `mConfig.targetState`，必须是 `NORMAL` 或为空。这样不会在切换到应用抽屉、最近任务时误触发。
+- 继续要求 Launcher 有焦点、非锁屏状态、无浮层以及触点位于未占用的 Workspace 网格区域。
+- 不增加后台常驻服务，不修改 KernelSU 的 Root 授权方式，也不改变已修复的原生设置开关实现。保持相同包名、LSPosed 作用域和签名证书，可直接覆盖 v1.6。
+- 新日志 `NORMAL home accepted before stable transition ends` 表示在返回桌面动画尚未结束时提前放行手势。
+
+参考 [AOSP Launcher3 StateManager.java](https://android.googlesource.com/platform/packages/apps/Launcher3/+/d0aa5b82db0ba4a173f8baf721f07351123c2290/src/com/android/launcher3/statemanager/StateManager.java) 中 `isInStableState()` 和 `onStateTransitionStart()` 的实现。
