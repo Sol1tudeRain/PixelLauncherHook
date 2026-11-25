@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.7
+# Pixel Launcher Double Tap 1.8
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -85,3 +85,13 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - 新日志 `NORMAL home accepted before stable transition ends` 表示在返回桌面动画尚未结束时提前放行手势。
 
 参考 [AOSP Launcher3 StateManager.java](https://android.googlesource.com/platform/packages/apps/Launcher3/+/d0aa5b82db0ba4a173f8baf721f07351123c2290/src/com/android/launcher3/statemanager/StateManager.java) 中 `isInStableState()` 和 `onStateTransitionStart()` 的实现。
+
+## v1.8：进一步改善返回桌面立即双击
+
+- 上一版（v1.7）只放宽 StateManager 状态判断，但 `Workspace.isPageInTransition()` 仍可能在返回动画期间直接丢弃点击，且无错误日志。
+- 本版 Hook Launcher 的 Activity.onResume，记录单个进程中的最近恢复时间；只有在恢复后 1200 毫秒内且满足 `NORMAL`、窗口焦点和浮层检查时，才允许在 Workspace 页面过渡阶段继续检查空白点击。普通跨桌面页面滑动仍会受原检查限制。
+- 仍拒绝图标、Widget、热座、浮层、多指输入和移动超出阈值的手势。
+- 增加去重诊断信息：`Launcher resumed`、`Workspace transition bypassed during recent home resume`、`first tap armed for double tap`、`tap discarded on finger lift`。不记录触摸坐标。
+- 和 v1.7 一样继续使用既有的 Root 锁屏执行路径及开关样式；应用包名、签名证书和 LSPosed 推荐作用域不变，可直接覆盖。
+
+注意：仅依据开源 Launcher3 和既有真机日志修复潜在阻塞，具体生效时机及退场动画交互必须通过 PixelOS 真机测试确认；不保证系统尚未向 Launcher 派发触摸事件时也能提前锁屏。
