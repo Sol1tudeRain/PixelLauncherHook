@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.4
+# Pixel Launcher Double Tap 2.5
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -152,3 +152,12 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - 保留原有图标/Widget/浮层、多指与滑动排除及 ROOT 锁屏流程。未获明确 HOME 信号时保守拒绝，不会把所有返回动画当作桌面。
 - 新日志：Quickstep gesture end-target hooks=N / Quickstep gesture destination HOME confirmed / Quickstep input gate: homeGesture=true/false / Quickstep early home: confirmed HOME gesture while launcher state lags。
 - 仍须真机验证，具体 ROM 可能优化了 GestureState.setEndTarget，届时仍可通过日志判断是否成功。
+
+## v2.5：跨焦点交接保留双击状态
+
+- v2.4 PixelOS 真机日志显示 HOME 已确认，Quickstep 在 Launcher 无窗口焦点时看到空白区域 DOWN；155ms 后 Launcher 有了焦点，但没有构成有效双击。旧版 Quickstep 路径在检测到 `hasWindowFocus()==true` 时直接 return，可能造成 DOWN/UP 分别由两种入口处理。
+- v2.5 在 `onResume` 后 2 秒且近期 Quickstep 的 `GestureState` 已确认 HOME 目标的短窗口，Quickstep 的 swipe-up 输入回调**跨越焦点交接继续观察**触摸，并和 Launcher.dispatchTouchEvent 使用同一个 TapTracker。
+- 依据 DOWN 时间、事件时间及动作，去重两条路径可能重复派发的同一个事件；如果 Quickstep 没观察到事件，Launcher 的正常分发路径仍可继续处理。焦点交接不再直接排除早期 HOME 触摸。
+- 仍要求 HOME 手势目标、Launcher 已恢复、设置启用、未锁屏、没有浮层、触点位于空白 Workspace；不拦截或注入输入，保留滑动、多指、图标、Widget 与热座排除。
+- 新增有限条 `Home handoff event: source=Quickstep|Launcher action=ACTION_DOWN|ACTION_UP|ACTION_CANCEL focused=... downTime=... eventTime=... trackingDown=... firstTap=...`，不用坐标就能逐次定位首次点击有无完成。
+- 原 Root 锁屏命令、桌面设置开关、模块包名与签名证书不变。本版依然需要真机测试。
