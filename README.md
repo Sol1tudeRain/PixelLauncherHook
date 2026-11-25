@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.2
+# Pixel Launcher Double Tap 2.3
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -134,3 +134,11 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - v2.2 精确接受 `swipe-up` 或 `swipe-up-dispN`（N 为数字）来兼容每显示器命名，不扩大到其他监视器。
 - 新增 `Quickstep swipe-up monitor matched` 诊断，之后应继续出现 `Quickstep swipe-up BatchedInputEventReceiver hook installed`，若无法获取底层输入接收器则会明确打印原因。
 - 本次保持原生设置开关、稳定签名、Launcher 普通桌面手势和 KernelSU Root 锁屏逻辑不变。动画期间提前锁屏仍需真机验证。
+
+## v2.3：在返回桌面动画目标明确为 NORMAL 时提前接收双击
+
+- v2.2 真机验证：成功 Hook `swipe-up-disp0` 的 `BatchedInputEventReceiver.onInputEvent`，并收到 `Quickstep monitor received raw ACTION_DOWN`。但之后出现 `not NORMAL launcher state`，说明一些返回动画早期事件仍被错误拒绝。
+- 仅对 Quickstep 预焦点输入、Launcher 恢复后 2 秒内、当前窗口尚未取得焦点的情形，若能反射验证 `StateManager.mConfig.targetState == LauncherState.NORMAL`，即使当前 `mState` 还未切至 NORMAL，也允许后续空白触点判断；缺少明确 NORMAL 目标则继续拒绝。
+- Quickstep 预焦点通道的 `Workspace.isPageInTransition()` 宽限与预焦点 2 秒窗口同步；普通桌面则仍沿用 1.2 秒页面过渡保护。滑动距离、多指输入、图标、Widget、浮层和锁屏检查均保留。
+- 增加有限条、不记录屏幕坐标的 `Quickstep input gate: resumed=... ageMs=... focused=...` 日志，以及状态原因 `Quickstep early home: state transitioning toward NORMAL` / `Quickstep early state rejected: ...`。
+- 保留 v2.2 的 Quickstep 输入 Hook、原 Root 休眠命令、系统桌面设置开关和固定签名。本版的改善仍需你的 PixelOS 真机验证。
