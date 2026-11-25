@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.8
+# Pixel Launcher Double Tap 1.9
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -95,3 +95,15 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - 和 v1.7 一样继续使用既有的 Root 锁屏执行路径及开关样式；应用包名、签名证书和 LSPosed 推荐作用域不变，可直接覆盖。
 
 注意：仅依据开源 Launcher3 和既有真机日志修复潜在阻塞，具体生效时机及退场动画交互必须通过 PixelOS 真机测试确认；不保证系统尚未向 Launcher 派发触摸事件时也能提前锁屏。
+
+## v1.9：Quickstep 返回桌面动画期间提前双击（实验性）
+
+- v1.6～v1.8 监听 `Launcher.dispatchTouchEvent()`，系统在返回桌面动画期间可能尚未把触摸派发到 Launcher 窗口。仅放宽 Launcher 状态和 Workspace 过渡检查无法处理这种情况。
+- 本版新增可选的 `TouchInteractionService.onInputEvent(InputEvent)` Hook，**只观察** Quickstep 已经创建的系统手势 `InputMonitor`。不创建新的监视器、不吞掉 `MotionEvent`、不修改系统导航。
+- 严格限制 Quickstep 早期输入：Launcher 的 `onResume` 之后 2 秒内、窗口尚未获得焦点、当前目标是 `NORMAL`、锁屏未启用、设置开关已开、没有浮层，并且屏幕坐标位于未被图标或 Widget 占用的 Workspace 上；仍按现有双击时序和位移限制判断。
+- 监视器事件与普通 Launcher 窗口事件使用同一个双击状态机，避免切换焦点时丢掉第一次点击。对同时分发的相同事件使用事件时间和动作去重。
+- 如果设备上的 Quickstep 优化移除了 `onInputEvent`，模块只在 LSPosed 日志记录“Quickstep pre-focus input unavailable”并退回既有行为；不会影响正常桌面双击。
+- 新日志：`Quickstep pre-focus input hook installed`、`Quickstep touch received before Launcher window focus` 和 `Quickstep pre-focus DOUBLE TAP ACCEPTED`。
+- 这仍是需要真机验证的实验性机制；InputMonitor 不保证在所有 PixelOS 版本都覆盖动画期间的触摸。保留包名、稳定签名、设置入口和旧 Root 锁屏执行方式。
+
+对应 AOSP 实现：[TouchInteractionService.java](https://android.googlesource.com/platform/packages/apps/Launcher3/+/f41858c23c5e7a7fbb14d0df6ab041154ec456ab/quickstep/src/com/android/quickstep/TouchInteractionService.java)。
