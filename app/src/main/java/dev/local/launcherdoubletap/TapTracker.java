@@ -29,6 +29,7 @@ final class TapTracker {
         return result;
     }
     boolean isDown() { return down; }
+    boolean hasPrevious() { return previous; }
     void reset() { down=false; page=null; clearPrevious(); }
     private void clearPrevious() { previous=false; lastPage=null; }
     private static float distance2(float x,float y,float a,float b) {
