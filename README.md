@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.9
+# Pixel Launcher Double Tap 2.0
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -107,3 +107,14 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - 这仍是需要真机验证的实验性机制；InputMonitor 不保证在所有 PixelOS 版本都覆盖动画期间的触摸。保留包名、稳定签名、设置入口和旧 Root 锁屏执行方式。
 
 对应 AOSP 实现：[TouchInteractionService.java](https://android.googlesource.com/platform/packages/apps/Launcher3/+/f41858c23c5e7a7fbb14d0df6ab041154ec456ab/quickstep/src/com/android/quickstep/TouchInteractionService.java)。
+
+## v2.0：适配 Pixel Launcher 优化后的 Quickstep 输入回调
+
+- v1.9 在实际 PixelOS 日志中报告 `NoSuchMethodException: TouchInteractionService.onInputEvent(InputEvent)`，导致提前手势入口未安装。
+- 不再只通过固定私有方法名 Hook，而是监听现有 `InputChannelCompat.InputEventReceiver` 的创建过程，从接收器构造函数参数定位实际 `InputEvent` 监听器，且只允许 Quickstep 相关调用栈或类名。
+- 对监听器类中的实际 `InputEvent` 回调 Hook，兼容经过优化和重命名的回调实现；同时扫描 TouchInteractionService 中实际存在的 `InputEvent` 方法作为兼容回退。
+- 去重来自多个入口的同一个触摸事件；观察而不修改输入，不创建新的输入监视器。
+- 新日志：`Quickstep receiver constructor hooks=N`、`Quickstep monitor listener hook installed`、`Quickstep monitor received raw ACTION_DOWN`。如果监听器未找到，日志可明确区分“接收器未创建”和“已创建但过滤未通过”。
+- 其余 Launcher 状态、Workspace 空白排除和 Root 锁屏逻辑保持不变。未经真机验证 Quickstep 观察到的事件是否覆盖返回桌面动画，故此机制仍属实验性。
+
+参考 AOSP [InputChannelCompat](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SystemUI/shared/src/com/android/systemui/shared/system/InputChannelCompat.java) 和 [InputMonitorCompat](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SystemUI/shared/src/com/android/systemui/shared/system/InputMonitorCompat.java)。

@@ -114,27 +114,101 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
     }
     /**
-     * Quickstep already owns a system gesture input monitor. It receives
-     * whole-display MotionEvents and filters navigation regions later in
-     * TouchInteractionService.onInputEvent. Observe, never consume or alter
-     * these events, and only while returning to a visible unfocused home.
+     * Pixel Launcher frequently optimizes/inlines
+     * TouchInteractionService.onInputEvent(InputEvent). Instead of assuming
+     * the source method survives, capture the existing Quickstep input
+     * monitor's callback when InputChannelCompat creates its receiver.
+     * No new monitor, event injection, input consumption or navigation change.
      */
+    private final HashSet<Class<?>> hookedQuickstepListenerClasses=new HashSet<>();
     private void installQuickstepInputHook(ClassLoader cl) {
+        try {
+            Class<?> receiver=XposedHelpers.findClass(
+                    "com.android.systemui.shared.system.InputChannelCompat$InputEventReceiver",
+                    cl);
+            int n=XposedBridge.hookAllConstructors(receiver,new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    try { discoverQuickstepListener(p.args); }
+                    catch(Throwable e) {XposedBridge.log(TAG+"Quickstep receiver discovery error: "+e);}
+                }
+            }).size();
+            XposedBridge.log(TAG+"Quickstep receiver constructor hooks="+n);
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Quickstep receiver wrapper not found: "+e);
+        }
+        // Fallback for optimized PixelOS variants that inline the wrapper
+        // constructor but preserve a 1-arg InputEvent method on the service.
         try {
             Class<?> tis=XposedHelpers.findClass(
                     "com.android.quickstep.TouchInteractionService",cl);
-            Method input=tis.getDeclaredMethod("onInputEvent",InputEvent.class);
-            XposedBridge.hookMethod(input,new XC_MethodHook() {
+            int hooked=0;
+            for(Method m:tis.getDeclaredMethods()) {
+                Class<?>[] args=m.getParameterTypes();
+                if(args.length!=1 || args[0]!=InputEvent.class)continue;
+                m.setAccessible(true);
+                XposedBridge.hookMethod(m,new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        if(p.args[0] instanceof MotionEvent) {
+                            try { observeQuickstepInput((MotionEvent)p.args[0]); }
+                            catch(Throwable e) { report(e); }
+                        }
+                    }
+                });
+                hooked++;
+                XposedBridge.log(TAG+"Quickstep service InputEvent hook installed: "+m);
+            }
+            if(hooked==0)XposedBridge.log(TAG+
+                    "Quickstep service has no direct InputEvent method; receiver discovery active");
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Quickstep service method scan unavailable: "+e);
+        }
+    }
+    private void discoverQuickstepListener(Object[] args) throws Exception {
+        Object callback=null;
+        for(Object arg:args) {
+            if(arg==null)continue;
+            for(Method m:arg.getClass().getDeclaredMethods()) {
+                Class<?>[] ps=m.getParameterTypes();
+                if(ps.length==1 && ps[0]==InputEvent.class
+                        && !Modifier.isStatic(m.getModifiers())) {
+                    callback=arg;break;
+                }
+            }
+            if(callback!=null)break;
+        }
+        if(callback==null)return;
+        // Restrict to Quickstep's monitor; multiple other input receivers
+        // may be constructed by the Launcher app.
+        boolean fromQuickstep=callback.getClass().getName()
+                .contains("TouchInteractionService");
+        if(!fromQuickstep) {
+            for(StackTraceElement frame:Thread.currentThread().getStackTrace()) {
+                if(frame.getClassName().contains("TouchInteractionService")) {
+                    fromQuickstep=true;break;
+                }
+            }
+        }
+        if(!fromQuickstep)return;
+        final Class<?> callbackClass=callback.getClass();
+        if(!hookedQuickstepListenerClasses.add(callbackClass))return;
+        int hooked=0;
+        for(Method m:callbackClass.getDeclaredMethods()) {
+            Class<?>[] ps=m.getParameterTypes();
+            if(ps.length!=1 || ps[0]!=InputEvent.class
+                    || Modifier.isStatic(m.getModifiers()))continue;
+            m.setAccessible(true);
+            XposedBridge.hookMethod(m,new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    if(!(p.args[0] instanceof MotionEvent))return;
-                    try { observeQuickstepInput((MotionEvent)p.args[0]); }
-                    catch(Throwable e) {report(e);}
+                    if(p.args[0] instanceof MotionEvent) {
+                        try { observeQuickstepInput((MotionEvent)p.args[0]); }
+                        catch(Throwable e) { report(e); }
+                    }
                 }
             });
-            XposedBridge.log(TAG+"Quickstep pre-focus input hook installed: "+input);
-        } catch(Throwable e) {
-            XposedBridge.log(TAG+"Quickstep pre-focus input unavailable: "+e);
+            hooked++;
         }
+        XposedBridge.log(TAG+"Quickstep monitor listener hook installed: "
+                +callbackClass.getName()+" methods="+hooked);
     }
     private boolean isMonitoredDuplicate(MotionEvent e) {
         return e.getDownTime()==monitoredDownTime
@@ -145,6 +219,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         // TouchInteractionService normally uses the Launcher main looper;
         // do not access View hierarchy or the TapTracker from other threads.
         if(Looper.myLooper()!=Looper.getMainLooper())return;
+        if(isMonitoredDuplicate(e))return;
+        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
+            trace("Quickstep monitor received raw ACTION_DOWN");
         Activity a=resumedLauncher;
         if(a==null || a.hasWindowFocus() || a.isFinishing())return;
         Long last=lastResumeTimes.get(a);
