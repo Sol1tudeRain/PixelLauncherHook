@@ -150,37 +150,64 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         return true;
     }
     /**
-     * PixelOS' optimized Launcher strips some StateManager accessor methods. Prefer
-     * isInStableState(), then use its actual state fields. Never assume NORMAL if
-     * no state can be verified (avoids sleeping in All Apps and Recents).
+     * StateManager.isInStableState(NORMAL) waits for mCurrentStableState and
+     * transition completion. On return-home animations mState can already
+     * be NORMAL, while the previous stable state has not updated yet.
+     *
+     * Allow taps as soon as Launcher is targeting NORMAL, but never during
+     * an outgoing transition to All Apps or Overview. Keep the existing
+     * window-focus, visible Workspace, floating-view and hit tests.
      */
     private boolean normalLauncherState(Object manager) {
+        Object current;
         try {
-            return Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInStableState",normalState));
-        } catch (NoSuchMethodError ignored) { }
+            current=XposedHelpers.getObjectField(manager,"mState");
+        } catch(NoSuchFieldError ignored) {
+            try {
+                current=XposedHelpers.callMethod(manager,"getState");
+            } catch(NoSuchMethodError missing) {
+                // If this optimized build exposes neither state field nor getter,
+                // fail safely: the stable-state check is the only proof available.
+                try {
+                    return Boolean.TRUE.equals(XposedHelpers.callMethod(
+                            manager,"isInStableState",normalState));
+                } catch(NoSuchMethodError alsoMissing) {
+                    trace("Launcher current state unavailable; refusing double tap");
+                    return false;
+                }
+            }
+        }
+        if(current!=normalState)return false;
+
+        // Reject outgoing transitions even if the visible workspace hasn't
+        // disappeared yet. Launcher3 stores the animation's destination here.
+        Object target=null;
+        boolean targetKnown=false;
         try {
-            Object active=XposedHelpers.getObjectField(manager,"mState");
-            if(active!=normalState) return false;
+            Object config=XposedHelpers.getObjectField(manager,"mConfig");
+            if(config!=null) {
+                target=XposedHelpers.getObjectField(config,"targetState");
+                targetKnown=true;
+            }
+        } catch(NoSuchFieldError missing) { /* Device build may rename the field. */ }
+        if(!targetKnown) {
             try {
-                Object stable=XposedHelpers.getObjectField(manager,"mCurrentStableState");
-                if(stable!=normalState) return false;
-            } catch(NoSuchFieldError ignored) { }
-            try {
-                if(Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInTransition"))) return false;
+                target=XposedHelpers.callMethod(manager,"getTargetState");
+                targetKnown=true;
             } catch(NoSuchMethodError ignored) { }
-            return true;
-        } catch(NoSuchFieldError ignored) { }
-        // Optional public accessor, retained in some variants.
+        }
+        if(targetKnown && target!=null && target!=normalState) {
+            trace("transition targets another Launcher state");
+            return false;
+        }
+        // Confirm this is an incoming home transition without waiting for
+        // mCurrentStableState, which changes only when animation completes.
         try {
-            Object stable=XposedHelpers.callMethod(manager,"getCurrentStableState");
-            if(stable!=normalState) return false;
-            try {
-                if(Boolean.TRUE.equals(XposedHelpers.callMethod(manager,"isInTransition"))) return false;
-            } catch(NoSuchMethodError ignored) { }
-            return true;
+            if(!Boolean.TRUE.equals(XposedHelpers.callMethod(
+                    manager,"isInStableState",normalState)))
+                trace("NORMAL home accepted before stable transition ends");
         } catch(NoSuchMethodError ignored) { }
-        report(new NoSuchMethodError("No supported Pixel Launcher state API or mState field in "+manager.getClass().getName()));
-        return false;
+        return true;
     }
     private View emptyPage(Activity a,float x,float y) throws Exception {
         if(!isHome(a)) return null;
