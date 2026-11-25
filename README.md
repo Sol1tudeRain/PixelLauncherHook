@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.1
+# Pixel Launcher Double Tap 2.2
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -127,3 +127,10 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - 加入日志 `Quickstep monitor receiver created: name=... argc=...`、`Quickstep swipe-up BatchedInputEventReceiver hook installed`、`Quickstep monitor received raw ACTION_DOWN`。用来判断接收器是否被创建、名称是否符合以及是否收到触摸。
 - 当前依旧只在返回桌面 2 秒内，Launcher 已恢复、尚未获得焦点且无遮挡、当前处于 NORMAL 状态时尝试提前双击；其余触摸均沿用 v1.8 正常桌面处理。
 - 原 Root 锁屏、设置开关、应用 ID 和签名证书不变。尚需真机检查优化后的 PixelOS 是否创建该接收器、真实输入的坐标范围以及返回动画时状态。
+
+## v2.2：修复 PixelOS Quickstep 监视器名称匹配
+
+- v2.1 的 PixelOS 日志确认监视器是 `swipe-up-disp0`（每个显示器一个），但 v2.1 只接受字符串 `swipe-up`，因此接收器被提前跳过。
+- v2.2 精确接受 `swipe-up` 或 `swipe-up-dispN`（N 为数字）来兼容每显示器命名，不扩大到其他监视器。
+- 新增 `Quickstep swipe-up monitor matched` 诊断，之后应继续出现 `Quickstep swipe-up BatchedInputEventReceiver hook installed`，若无法获取底层输入接收器则会明确打印原因。
+- 本次保持原生设置开关、稳定签名、Launcher 普通桌面手势和 KernelSU Root 锁屏逻辑不变。动画期间提前锁屏仍需真机验证。
