@@ -34,8 +34,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     // Short-lived pre-focus input handoff while Quickstep returns to home.
     private static final long EARLY_INPUT_WINDOW_MS=2000;
     private Activity resumedLauncher;
-    private long monitoredDownTime=-1, monitoredEventTime=-1;
-    private int monitoredAction=-1;
+    // Shared event identity for the Quickstep monitor / Launcher window.
+    // Both can see the same finger event around the focus handoff.
+    private long handledDownTime=-1, handledEventTime=-1;
+    private int handledAction=-1;
+    private int homeHandoffEventLogs;
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
@@ -75,9 +78,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         MotionEvent event=(MotionEvent)param.args[0];
                         // The system gesture monitor can see a touch shortly before
                         // the Launcher window takes focus. Never count it twice.
-                        if(isMonitoredDuplicate(event))return;
+                        if(isHandledDuplicate(event))return;
                         if(!a.hasWindowFocus())return;
-                        observe(a,event,param,false);
+                        boolean handoff=inHomeHandoff(a);
+                        if(handoff)logHomeHandoffEvent("Launcher",a,event);
+                        observe(a,event,param,handoff);
+                        markHandledEvent(event);
                     }
                     catch(Throwable e) { reset(a); report(e); }
                 }
@@ -85,7 +91,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     if (Boolean.TRUE.equals(param.getObjectExtra("launcherDoubleTap")) && !param.hasThrowable()) {
                         try {
                             Activity a=(Activity)param.thisObject;
-                            if (isHome(a)) sleep(a);
+                            if (isHome(a) || (inHomeHandoff(a) && isHome(a,true)))
+                                sleep(a);
                         } catch(Throwable e) { report(e); }
                     }
                 }
@@ -106,61 +113,222 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         Activity a=(Activity)p.thisObject;
                         reset(a);
                         if(resumedLauncher==a)resumedLauncher=null;
+                        lastQuickstepHomeTargetAt=-1;
                     }
                 }
             });
             XposedBridge.log(TAG+"Hook installed: "+dispatch);
             installQuickstepInputHook(cl);
+            installQuickstepHomeTargetHook(cl);
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
     }
     /**
-     * Quickstep already owns a system gesture input monitor. It receives
-     * whole-display MotionEvents and filters navigation regions later in
-     * TouchInteractionService.onInputEvent. Observe, never consume or alter
-     * these events, and only while returning to a visible unfocused home.
+     * Hook the actual BatchedInputEventReceiver created by Quickstep's
+     * existing InputChannelCompat wrapper. It must override the framework's
+     * onInputEvent(InputEvent), unlike optimizable listener lambdas.
+     *
+     * Only instances of the system's "swipe-up" input monitor are observed.
+     * Never consume or alter the system gesture stream.
      */
+    private final HashSet<Class<?>> hookedMonitorReceiverClasses=new HashSet<>();
+    private final WeakHashMap<Object,Boolean> selectedMonitorReceivers=new WeakHashMap<>();
+    private int discoveredReceiverCount;
+    private int quickstepEventDiagnostics;
+    private long lastQuickstepHomeTargetAt=-1;
+    private static final long QUICKSTEP_HOME_TARGET_MAX_AGE_MS=2400;
     private void installQuickstepInputHook(ClassLoader cl) {
+        try {
+            Class<?> wrapper=XposedHelpers.findClass(
+                    "com.android.systemui.shared.system.InputChannelCompat$InputEventReceiver",cl);
+            int n=XposedBridge.hookAllConstructors(wrapper,new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    try { captureQuickstepReceiver(p.thisObject,p.args); }
+                    catch(Throwable e) {
+                        XposedBridge.log(TAG+"Quickstep receiver discovery error: "+e);
+                    }
+                }
+            }).size();
+            XposedBridge.log(TAG+"Quickstep receiver constructor hooks="+n);
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Quickstep receiver wrapper not found: "+e);
+        }
+        // Backward-compatible fallback for variants preserving the method
+        // signature on TouchInteractionService.
         try {
             Class<?> tis=XposedHelpers.findClass(
                     "com.android.quickstep.TouchInteractionService",cl);
-            Method input=tis.getDeclaredMethod("onInputEvent",InputEvent.class);
-            XposedBridge.hookMethod(input,new XC_MethodHook() {
+            int hooked=0;
+            for(Method m:tis.getDeclaredMethods()) {
+                Class<?>[] args=m.getParameterTypes();
+                if(args.length!=1 || args[0]!=InputEvent.class)continue;
+                m.setAccessible(true);
+                XposedBridge.hookMethod(m,new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        if(p.args[0] instanceof MotionEvent) {
+                            try {observeQuickstepInput((MotionEvent)p.args[0]);}
+                            catch(Throwable e) {report(e);}
+                        }
+                    }
+                });
+                hooked++;
+                XposedBridge.log(TAG+"Quickstep service InputEvent hook installed: "+m);
+            }
+            if(hooked==0)
+                XposedBridge.log(TAG+"Quickstep direct method unavailable; receiver monitor active");
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Quickstep service scan unavailable: "+e);
+        }
+    }
+    private void captureQuickstepReceiver(Object wrapper,Object[] args) throws Exception {
+        String name=null;
+        if(args.length>=1 && args[0] instanceof String)name=(String)args[0];
+        if(name==null) {
+            try {
+                Object n=XposedHelpers.getObjectField(wrapper,"mName");
+                if(n instanceof String)name=(String)n;
+            } catch(NoSuchFieldError ignored) { }
+        }
+        if(discoveredReceiverCount++<5) {
+            XposedBridge.log(TAG+"Quickstep monitor receiver created: name="
+                    +(name==null?"unknown":name)+" argc="+args.length);
+        }
+        // PixelOS names its per-display gesture monitor "swipe-up-disp0".
+        // Match only Quickstep's known swipe-up pattern, not unrelated monitors.
+        if(name==null || !name.matches("swipe-up(?:-disp[0-9]+)?"))return;
+        XposedBridge.log(TAG+"Quickstep swipe-up monitor matched: "+name);
+
+        Object underlying=null;
+        try {underlying=XposedHelpers.getObjectField(wrapper,"mReceiver");}
+        catch(NoSuchFieldError ignored) { }
+        if(underlying==null) {
+            // Field names can be obfuscated, but the Android framework base
+            // class of the receiver cannot be renamed.
+            Class<?> framework=Class.forName("android.view.InputEventReceiver");
+            for(Class<?> c=wrapper.getClass();c!=null && underlying==null;c=c.getSuperclass()) {
+                for(Field field:c.getDeclaredFields()) {
+                    if(!framework.isAssignableFrom(field.getType()))continue;
+                    try {
+                        field.setAccessible(true);
+                        underlying=field.get(wrapper);
+                        if(underlying!=null)break;
+                    } catch(Throwable ignored) { }
+                }
+            }
+        }
+        if(underlying==null) {
+            XposedBridge.log(TAG+"Quickstep swipe-up receiver has no framework input receiver");
+            return;
+        }
+        selectedMonitorReceivers.put(underlying,Boolean.TRUE);
+        Class<?> receiverClass=underlying.getClass();
+        if(!hookedMonitorReceiverClasses.add(receiverClass))return;
+        int hooked=0;
+        for(Method m:receiverClass.getDeclaredMethods()) {
+            if(!m.getName().equals("onInputEvent")
+                    || m.getParameterCount()!=1
+                    || m.getParameterTypes()[0]!=InputEvent.class)continue;
+            m.setAccessible(true);
+            XposedBridge.hookMethod(m,new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if(!Boolean.TRUE.equals(selectedMonitorReceivers.get(p.thisObject)))return;
                     if(!(p.args[0] instanceof MotionEvent))return;
-                    try { observeQuickstepInput((MotionEvent)p.args[0]); }
+                    try {observeQuickstepInput((MotionEvent)p.args[0]);}
                     catch(Throwable e) {report(e);}
                 }
             });
-            XposedBridge.log(TAG+"Quickstep pre-focus input hook installed: "+input);
+            hooked++;
+        }
+        XposedBridge.log(TAG+"Quickstep swipe-up BatchedInputEventReceiver hook installed: "
+                +receiverClass.getName()+" methods="+hooked);
+    }
+    /**
+     * GestureState records whether the swipe's actual destination is HOME.
+     * The launcher StateManager can remain BACKGROUND_APP and expose no
+     * targetState while Quickstep's app-closing animation is still running.
+     * Do not guess that a resume implies home; require a real HOME gesture.
+     */
+    private void installQuickstepHomeTargetHook(ClassLoader cl) {
+        try {
+            Class<?> gs=XposedHelpers.findClass("com.android.quickstep.GestureState",cl);
+            int count=XposedBridge.hookAllMethods(gs,"setEndTarget",new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    if(p.args.length==0 || p.args[0]==null)return;
+                    String target=String.valueOf(p.args[0]);
+                    if("HOME".equals(target)) {
+                        lastQuickstepHomeTargetAt=SystemClock.uptimeMillis();
+                        trace("Quickstep gesture destination HOME confirmed");
+                    } else {
+                        lastQuickstepHomeTargetAt=-1;
+                    }
+                }
+            }).size();
+            XposedBridge.log(TAG+"Quickstep gesture end-target hooks="+count);
         } catch(Throwable e) {
-            XposedBridge.log(TAG+"Quickstep pre-focus input unavailable: "+e);
+            XposedBridge.log(TAG+"Quickstep gesture destination hook unavailable: "+e);
         }
     }
-    private boolean isMonitoredDuplicate(MotionEvent e) {
-        return e.getDownTime()==monitoredDownTime
-                && e.getEventTime()==monitoredEventTime
-                && e.getActionMasked()==monitoredAction;
+    private boolean hasRecentQuickstepHomeTarget() {
+        long age=SystemClock.uptimeMillis()-lastQuickstepHomeTargetAt;
+        return lastQuickstepHomeTargetAt>=0 && age>=0
+                && age<=QUICKSTEP_HOME_TARGET_MAX_AGE_MS;
+    }
+    private boolean isHandledDuplicate(MotionEvent e) {
+        return e.getDownTime()==handledDownTime
+                && e.getEventTime()==handledEventTime
+                && e.getActionMasked()==handledAction;
+    }
+    private void markHandledEvent(MotionEvent e) {
+        handledDownTime=e.getDownTime();
+        handledEventTime=e.getEventTime();
+        handledAction=e.getActionMasked();
+    }
+    private boolean inHomeHandoff(Activity a) {
+        Long resumedAt=lastResumeTimes.get(a);
+        if(resumedAt==null || !hasRecentQuickstepHomeTarget())return false;
+        long age=SystemClock.uptimeMillis()-resumedAt;
+        return age>=0 && age<=EARLY_INPUT_WINDOW_MS;
+    }
+    /**
+     * Event-by-event diagnostics during the early HOME transition.
+     * Limited to 80 events per Launcher process; never logs coordinates.
+     */
+    private void logHomeHandoffEvent(String source,Activity a,MotionEvent e) {
+        int action=e.getActionMasked();
+        if(action!=MotionEvent.ACTION_DOWN && action!=MotionEvent.ACTION_UP
+                && action!=MotionEvent.ACTION_CANCEL)return;
+        if(homeHandoffEventLogs++>=80)return;
+        TapTracker t=tracker(a);
+        XposedBridge.log(TAG+"Home handoff event: source="+source
+                +" action="+MotionEvent.actionToString(action)
+                +" focused="+a.hasWindowFocus()
+                +" downTime="+e.getDownTime()+" eventTime="+e.getEventTime()
+                +" trackingDown="+t.isDown()+" firstTap="+t.hasPrevious());
     }
     private void observeQuickstepInput(MotionEvent e) throws Exception {
-        // TouchInteractionService normally uses the Launcher main looper;
-        // do not access View hierarchy or the TapTracker from other threads.
+        // The existing swipe-up monitor sees the gesture while the Launcher
+        // window gains focus. Continue through that handoff so the DOWN and UP
+        // cannot be split between two independent event streams.
         if(Looper.myLooper()!=Looper.getMainLooper())return;
-        Activity a=resumedLauncher;
-        if(a==null || a.hasWindowFocus() || a.isFinishing())return;
-        Long last=lastResumeTimes.get(a);
-        if(last==null)return;
-        long age=SystemClock.uptimeMillis()-last;
-        if(age<0 || age>EARLY_INPUT_WINDOW_MS)return;
-        if(!LauncherSettingsHook.isEnabled(a))return;
-        if(!isHome(a,true))return;
-        // Only mark accepted pre-focus events: normal window dispatch may
-        // still receive the same MotionEvent during a focus handoff.
-        monitoredDownTime=e.getDownTime();
-        monitoredEventTime=e.getEventTime();
-        monitoredAction=e.getActionMasked();
         if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
-            trace("Quickstep touch received before Launcher window focus");
+            trace("Quickstep monitor received raw ACTION_DOWN");
+        Activity a=resumedLauncher;
+        Long resumedAt=a==null?null:lastResumeTimes.get(a);
+        long age=resumedAt==null?Long.MAX_VALUE:SystemClock.uptimeMillis()-resumedAt;
+        boolean focused=a!=null && a.hasWindowFocus();
+        if(e.getActionMasked()==MotionEvent.ACTION_DOWN && quickstepEventDiagnostics++<16) {
+            XposedBridge.log(TAG+"Quickstep input gate: resumed="+(a!=null)
+                    +" ageMs="+(age==Long.MAX_VALUE?"unknown":age)
+                    +" focused="+focused
+                    +" homeGesture="+hasRecentQuickstepHomeTarget()
+                    +" action=DOWN");
+        }
+        if(a==null || a.isFinishing() || !inHomeHandoff(a))return;
+        if(!LauncherSettingsHook.isEnabled(a))return;
+        if(isHandledDuplicate(e))return;
+        if(!isHome(a,true))return;
+        logHomeHandoffEvent("Quickstep",a,e);
         observe(a,e,null,true);
+        markHandledEvent(e);
     }
     private static Method findDispatch(Class<?> c) throws NoSuchMethodException {
         for (;c!=null;c=c.getSuperclass()) {
@@ -212,9 +380,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 if(t.isDown()) {
                     View page=emptyPage(a,x,y,prefocus);
                     if(t.finish(e.getEventTime(),x,y,page)) {
-                        if(prefocus) {
+                        if(p==null) {
                             if(isHome(a,true)) {
-                                trace("Quickstep pre-focus DOUBLE TAP ACCEPTED");
+                                trace("Quickstep HOME handoff DOUBLE TAP ACCEPTED");
                                 sleep(a);
                             }
                         } else {
@@ -237,76 +405,71 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     }
     private boolean isHome(Activity a) throws Exception {return isHome(a,false);}
     private boolean isHome(Activity a,boolean prefocus) throws Exception {
-        if(a.isFinishing() || (!prefocus && !a.hasWindowFocus())
-                || (prefocus && a.hasWindowFocus())) {
+        // Early HOME input can continue after focus is obtained. The caller
+        // must have already verified the recent Quickstep HOME destination.
+        if(a.isFinishing() || (!prefocus && !a.hasWindowFocus())) {
             trace("not focused or finishing");return false;
         }
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) {trace("keyguard active");return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
-        if(manager==null || !normalLauncherState(manager)) {trace("not NORMAL launcher state");return false;}
+        if(manager==null || !normalLauncherState(manager,prefocus)) {trace("not NORMAL launcher state");return false;}
         if(topOpen.invoke(null,a)!=null) {trace("floating view open");return false;}
         return true;
     }
     /**
-     * StateManager.isInStableState(NORMAL) waits for mCurrentStableState and
-     * transition completion. On return-home animations mState can already
-     * be NORMAL, while the previous stable state has not updated yet.
-     *
-     * Allow taps as soon as Launcher is targeting NORMAL, but never during
-     * an outgoing transition to All Apps or Overview. Keep the existing
-     * window-focus, visible Workspace, floating-view and hit tests.
+     * In a Quickstep return-to-home animation, mState can still refer to
+     * OVERVIEW while mConfig.targetState is already NORMAL. Requiring
+     * mState==NORMAL discards early empty taps. Only a verified NORMAL target
+     * can relax this check in the short pre-focus window; a null or foreign
+     * target never enables that path. Regular Launcher dispatch remains strict.
      */
-    private boolean normalLauncherState(Object manager) {
+    private boolean normalLauncherState(Object manager,boolean prefocus) {
         Object current;
         try {
             current=XposedHelpers.getObjectField(manager,"mState");
-        } catch(NoSuchFieldError ignored) {
-            try {
-                current=XposedHelpers.callMethod(manager,"getState");
-            } catch(NoSuchMethodError missing) {
-                // If this optimized build exposes neither state field nor getter,
-                // fail safely: the stable-state check is the only proof available.
+        } catch(NoSuchFieldError missingField) {
+            try {current=XposedHelpers.callMethod(manager,"getState");}
+            catch(NoSuchMethodError missingGetter) {
                 try {
                     return Boolean.TRUE.equals(XposedHelpers.callMethod(
                             manager,"isInStableState",normalState));
-                } catch(NoSuchMethodError alsoMissing) {
+                } catch(NoSuchMethodError missingAll) {
                     trace("Launcher current state unavailable; refusing double tap");
                     return false;
                 }
             }
         }
-        if(current!=normalState)return false;
-
-        // Reject outgoing transitions even if the visible workspace hasn't
-        // disappeared yet. Launcher3 stores the animation's destination here.
         Object target=null;
-        boolean targetKnown=false;
         try {
             Object config=XposedHelpers.getObjectField(manager,"mConfig");
-            if(config!=null) {
+            if(config!=null)
                 target=XposedHelpers.getObjectField(config,"targetState");
-                targetKnown=true;
-            }
-        } catch(NoSuchFieldError missing) { /* Device build may rename the field. */ }
-        if(!targetKnown) {
-            try {
-                target=XposedHelpers.callMethod(manager,"getTargetState");
-                targetKnown=true;
-            } catch(NoSuchMethodError ignored) { }
+        } catch(NoSuchFieldError missing) {
+            // Do not infer a NORMAL target when OEM fields are removed.
         }
-        if(targetKnown && target!=null && target!=normalState) {
-            trace("transition targets another Launcher state");
+        if(target==null) {
+            try {target=XposedHelpers.callMethod(manager,"getTargetState");}
+            catch(NoSuchMethodError ignored) { }
+        }
+        if(target!=null && target!=normalState) {
+            if(prefocus)trace("Quickstep early state rejected: target is not NORMAL");
             return false;
         }
-        // Confirm this is an incoming home transition without waiting for
-        // mCurrentStableState, which changes only when animation completes.
-        try {
-            if(!Boolean.TRUE.equals(XposedHelpers.callMethod(
-                    manager,"isInStableState",normalState)))
-                trace("NORMAL home accepted before stable transition ends");
-        } catch(NoSuchMethodError ignored) { }
-        return true;
+        if(current==normalState)return true;
+        if(prefocus && target==normalState) {
+            trace("Quickstep early home: state transitioning toward NORMAL");
+            return true;
+        }
+        // Quickstep's HOME gesture is a stronger indication of the actual
+        // destination than a nullable/optimized StateManager target. Only
+        // the currently resumed, unfocused launcher can use this exemption.
+        if(prefocus && target==null && hasRecentQuickstepHomeTarget()) {
+            trace("Quickstep early home: confirmed HOME gesture while launcher state lags");
+            return true;
+        }
+        if(prefocus)trace("Quickstep early state rejected: no confirmed NORMAL/HOME target");
+        return false;
     }
     private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
         if(!isHome(a,prefocus)) return null;
@@ -323,7 +486,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 Long resumedAt=lastResumeTimes.get(a);
                 long age=resumedAt==null ? Long.MAX_VALUE
                         : SystemClock.uptimeMillis()-resumedAt;
-                if(age<0 || age>HOME_RESUME_GRACE_MS) {
+                if(age<0 || age>(prefocus ? EARLY_INPUT_WINDOW_MS : HOME_RESUME_GRACE_MS)) {
                     trace("Workspace page transition blocks tap outside home-resume window");
                     return null;
                 }
