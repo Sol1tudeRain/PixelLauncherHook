@@ -1,5 +1,4 @@
 package dev.local.launcherdoubletap;
-
 import android.app.Activity;
 import android.app.KeyguardManager;
 import android.content.Context;
@@ -24,7 +23,6 @@ import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
-
 public final class LauncherHook implements IXposedHookLoadPackage {
     private static final String TARGET="com.google.android.apps.nexuslauncher";
     private static final String TAG="[LauncherDoubleTap] ";
@@ -46,7 +44,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private Method topOpen;
     private final Rect rect=new Rect();
     private final int[] screen=new int[2];
-
     @Override public void handleLoadPackage(XC_LoadPackage.LoadPackageParam p) {
         if (!TARGET.equals(p.packageName) || !TARGET.equals(p.processName)) return;
         try { LauncherSettingsHook.install(p.classLoader); }
@@ -100,7 +97,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         Activity a=(Activity)p.thisObject;
                         lastResumeTimes.put(a,SystemClock.uptimeMillis());
                         resumedLauncher=a;
-                        
                     }
                 }
             });
@@ -179,7 +175,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         // PixelOS names its per-display gesture monitor "swipe-up-disp0".
         // Match only Quickstep's known swipe-up pattern, not unrelated monitors.
         if(name==null || !name.matches("swipe-up(?:-disp[0-9]+)?"))return;
-
         Object underlying=null;
         try {underlying=XposedHelpers.getObjectField(wrapper,"mReceiver");}
         catch(NoSuchFieldError ignored) { }
@@ -235,7 +230,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     String target=String.valueOf(p.args[0]);
                     if("HOME".equals(target)) {
                         lastQuickstepHomeTargetAt=SystemClock.uptimeMillis();
-                        
                     } else {
                         lastQuickstepHomeTargetAt=-1;
                     }
@@ -300,8 +294,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private void observe(Activity a, MotionEvent e, XC_MethodHook.MethodHookParam p,
                          boolean prefocus) throws Exception {
         if (!LauncherSettingsHook.isEnabled(a)) {
-            if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
-                
             reset(a);
             return;
         }
@@ -325,12 +317,10 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     if(t.finish(e.getEventTime(),x,y,page)) {
                         if(p==null) {
                             if(isHome(a,true)) {
-                                
                                 sleep(a);
                             }
                         } else {
                             p.setObjectExtra("launcherDoubleTap",true);
-                            
                         }
                     }
                 }
@@ -374,7 +364,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     return Boolean.TRUE.equals(XposedHelpers.callMethod(
                             manager,"isInStableState",normalState));
                 } catch(NoSuchMethodError missingAll) {
-                    
                     return false;
                 }
             }
@@ -392,22 +381,18 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             catch(NoSuchMethodError ignored) { }
         }
         if(target!=null && target!=normalState) {
-
             return false;
         }
         if(current==normalState)return true;
         if(prefocus && target==normalState) {
-            
             return true;
         }
         // Quickstep's HOME gesture is a stronger indication of the actual
         // destination than a nullable/optimized StateManager target. Only
         // the currently resumed, unfocused launcher can use this exemption.
         if(prefocus && target==null && hasRecentQuickstepHomeTarget()) {
-            
             return true;
         }
-
         return false;
     }
     private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
@@ -426,10 +411,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 long age=resumedAt==null ? Long.MAX_VALUE
                         : SystemClock.uptimeMillis()-resumedAt;
                 if(age<0 || age>(prefocus ? EARLY_INPUT_WINDOW_MS : HOME_RESUME_GRACE_MS)) {
-                    
                     return null;
                 }
-                
             }
         } catch(NoSuchMethodError ignored) { /* optimized Pixel Launcher */ }
         // The visible workspace may have multiple pages on large displays.
@@ -443,7 +426,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 // Decorative CellLayout overlays are allowed. Only interactive
                 // children outside the shortcut container block an empty tap.
                 else if(hit(child,x,y) && (child.isClickable() || child.isLongClickable())) {
-                    
                     return null;
                 }
             }
@@ -478,10 +460,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 }
                 branch=parent;
             }
-            
             return page;
         }
-        
         return null;
     }
     /**
@@ -515,7 +495,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         }
         return null;
     }
-
     private ViewGroup findWorkspaceView(View node,int depth) {
         if(workspaceClass.isInstance(node))return (ViewGroup)node;
         if(!(node instanceof ViewGroup) || depth>24)return null;
@@ -526,7 +505,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         }
         return null;
     }
-
     private boolean hit(View v,float x,float y) {
         // getGlobalVisibleRect uses root coordinates, whereas MotionEvent raw uses screen coordinates.
         if(!v.isShown() || v.getAlpha()<=0.01f || !v.getGlobalVisibleRect(rect))return false;
@@ -536,7 +514,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         return x>=rect.left && x<rect.right && y>=rect.top && y<rect.bottom;
     }
     private void sleep(Activity a) {
-        
         if(!sleeping.compareAndSet(false,true))return;
         Context context=a.getApplicationContext();
         new Thread(()->{
@@ -552,7 +529,6 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 if(!proc.waitFor(60,java.util.concurrent.TimeUnit.SECONDS)) {
                     proc.destroy(); XposedBridge.log(TAG+"Root request timed out");
                 } else if(proc.exitValue()!=0) XposedBridge.log(TAG+"Sleep failed; check launcher root permission, exit="+proc.exitValue());
-
             } catch(Throwable e) {XposedBridge.log(TAG+"Sleep failed: "+e);}
             finally {sleeping.set(false);}
         },"LauncherDoubleTap-sleep").start();
