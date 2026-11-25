@@ -114,30 +114,34 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
     }
     /**
-     * Pixel Launcher frequently optimizes/inlines
-     * TouchInteractionService.onInputEvent(InputEvent). Instead of assuming
-     * the source method survives, capture the existing Quickstep input
-     * monitor's callback when InputChannelCompat creates its receiver.
-     * No new monitor, event injection, input consumption or navigation change.
+     * Hook the actual BatchedInputEventReceiver created by Quickstep's
+     * existing InputChannelCompat wrapper. It must override the framework's
+     * onInputEvent(InputEvent), unlike optimizable listener lambdas.
+     *
+     * Only instances of the system's "swipe-up" input monitor are observed.
+     * Never consume or alter the system gesture stream.
      */
-    private final HashSet<Class<?>> hookedQuickstepListenerClasses=new HashSet<>();
+    private final HashSet<Class<?>> hookedMonitorReceiverClasses=new HashSet<>();
+    private final WeakHashMap<Object,Boolean> selectedMonitorReceivers=new WeakHashMap<>();
+    private int discoveredReceiverCount;
     private void installQuickstepInputHook(ClassLoader cl) {
         try {
-            Class<?> receiver=XposedHelpers.findClass(
-                    "com.android.systemui.shared.system.InputChannelCompat$InputEventReceiver",
-                    cl);
-            int n=XposedBridge.hookAllConstructors(receiver,new XC_MethodHook() {
-                @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    try { discoverQuickstepListener(p.args); }
-                    catch(Throwable e) {XposedBridge.log(TAG+"Quickstep receiver discovery error: "+e);}
+            Class<?> wrapper=XposedHelpers.findClass(
+                    "com.android.systemui.shared.system.InputChannelCompat$InputEventReceiver",cl);
+            int n=XposedBridge.hookAllConstructors(wrapper,new XC_MethodHook() {
+                @Override protected void afterHookedMethod(MethodHookParam p) {
+                    try { captureQuickstepReceiver(p.thisObject,p.args); }
+                    catch(Throwable e) {
+                        XposedBridge.log(TAG+"Quickstep receiver discovery error: "+e);
+                    }
                 }
             }).size();
             XposedBridge.log(TAG+"Quickstep receiver constructor hooks="+n);
         } catch(Throwable e) {
             XposedBridge.log(TAG+"Quickstep receiver wrapper not found: "+e);
         }
-        // Fallback for optimized PixelOS variants that inline the wrapper
-        // constructor but preserve a 1-arg InputEvent method on the service.
+        // Backward-compatible fallback for variants preserving the method
+        // signature on TouchInteractionService.
         try {
             Class<?> tis=XposedHelpers.findClass(
                     "com.android.quickstep.TouchInteractionService",cl);
@@ -149,66 +153,78 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 XposedBridge.hookMethod(m,new XC_MethodHook() {
                     @Override protected void beforeHookedMethod(MethodHookParam p) {
                         if(p.args[0] instanceof MotionEvent) {
-                            try { observeQuickstepInput((MotionEvent)p.args[0]); }
-                            catch(Throwable e) { report(e); }
+                            try {observeQuickstepInput((MotionEvent)p.args[0]);}
+                            catch(Throwable e) {report(e);}
                         }
                     }
                 });
                 hooked++;
                 XposedBridge.log(TAG+"Quickstep service InputEvent hook installed: "+m);
             }
-            if(hooked==0)XposedBridge.log(TAG+
-                    "Quickstep service has no direct InputEvent method; receiver discovery active");
+            if(hooked==0)
+                XposedBridge.log(TAG+"Quickstep direct method unavailable; receiver monitor active");
         } catch(Throwable e) {
-            XposedBridge.log(TAG+"Quickstep service method scan unavailable: "+e);
+            XposedBridge.log(TAG+"Quickstep service scan unavailable: "+e);
         }
     }
-    private void discoverQuickstepListener(Object[] args) throws Exception {
-        Object callback=null;
-        for(Object arg:args) {
-            if(arg==null)continue;
-            for(Method m:arg.getClass().getDeclaredMethods()) {
-                Class<?>[] ps=m.getParameterTypes();
-                if(ps.length==1 && ps[0]==InputEvent.class
-                        && !Modifier.isStatic(m.getModifiers())) {
-                    callback=arg;break;
+    private void captureQuickstepReceiver(Object wrapper,Object[] args) throws Exception {
+        String name=null;
+        if(args.length>=1 && args[0] instanceof String)name=(String)args[0];
+        if(name==null) {
+            try {
+                Object n=XposedHelpers.getObjectField(wrapper,"mName");
+                if(n instanceof String)name=(String)n;
+            } catch(NoSuchFieldError ignored) { }
+        }
+        if(discoveredReceiverCount++<5) {
+            XposedBridge.log(TAG+"Quickstep monitor receiver created: name="
+                    +(name==null?"unknown":name)+" argc="+args.length);
+        }
+        if(!"swipe-up".equals(name))return;
+
+        Object underlying=null;
+        try {underlying=XposedHelpers.getObjectField(wrapper,"mReceiver");}
+        catch(NoSuchFieldError ignored) { }
+        if(underlying==null) {
+            // Field names can be obfuscated, but the Android framework base
+            // class of the receiver cannot be renamed.
+            Class<?> framework=android.view.InputEventReceiver.class;
+            for(Class<?> c=wrapper.getClass();c!=null && underlying==null;c=c.getSuperclass()) {
+                for(Field field:c.getDeclaredFields()) {
+                    if(!framework.isAssignableFrom(field.getType()))continue;
+                    try {
+                        field.setAccessible(true);
+                        underlying=field.get(wrapper);
+                        if(underlying!=null)break;
+                    } catch(Throwable ignored) { }
                 }
             }
-            if(callback!=null)break;
         }
-        if(callback==null)return;
-        // Restrict to Quickstep's monitor; multiple other input receivers
-        // may be constructed by the Launcher app.
-        boolean fromQuickstep=callback.getClass().getName()
-                .contains("TouchInteractionService");
-        if(!fromQuickstep) {
-            for(StackTraceElement frame:Thread.currentThread().getStackTrace()) {
-                if(frame.getClassName().contains("TouchInteractionService")) {
-                    fromQuickstep=true;break;
-                }
-            }
+        if(underlying==null) {
+            XposedBridge.log(TAG+"Quickstep swipe-up receiver has no framework input receiver");
+            return;
         }
-        if(!fromQuickstep)return;
-        final Class<?> callbackClass=callback.getClass();
-        if(!hookedQuickstepListenerClasses.add(callbackClass))return;
+        selectedMonitorReceivers.put(underlying,Boolean.TRUE);
+        Class<?> receiverClass=underlying.getClass();
+        if(!hookedMonitorReceiverClasses.add(receiverClass))return;
         int hooked=0;
-        for(Method m:callbackClass.getDeclaredMethods()) {
-            Class<?>[] ps=m.getParameterTypes();
-            if(ps.length!=1 || ps[0]!=InputEvent.class
-                    || Modifier.isStatic(m.getModifiers()))continue;
+        for(Method m:receiverClass.getDeclaredMethods()) {
+            if(!m.getName().equals("onInputEvent")
+                    || m.getParameterCount()!=1
+                    || m.getParameterTypes()[0]!=InputEvent.class)continue;
             m.setAccessible(true);
             XposedBridge.hookMethod(m,new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
-                    if(p.args[0] instanceof MotionEvent) {
-                        try { observeQuickstepInput((MotionEvent)p.args[0]); }
-                        catch(Throwable e) { report(e); }
-                    }
+                    if(!Boolean.TRUE.equals(selectedMonitorReceivers.get(p.thisObject)))return;
+                    if(!(p.args[0] instanceof MotionEvent))return;
+                    try {observeQuickstepInput((MotionEvent)p.args[0]);}
+                    catch(Throwable e) {report(e);}
                 }
             });
             hooked++;
         }
-        XposedBridge.log(TAG+"Quickstep monitor listener hook installed: "
-                +callbackClass.getName()+" methods="+hooked);
+        XposedBridge.log(TAG+"Quickstep swipe-up BatchedInputEventReceiver hook installed: "
+                +receiverClass.getName()+" methods="+hooked);
     }
     private boolean isMonitoredDuplicate(MotionEvent e) {
         return e.getDownTime()==monitoredDownTime
@@ -216,7 +232,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 && e.getActionMasked()==monitoredAction;
     }
     private void observeQuickstepInput(MotionEvent e) throws Exception {
-        // TouchInteractionService normally uses the Launcher main looper;
+        // InputMonitorCompat normally dispatches Quickstep on the main looper;
         // do not access View hierarchy or the TapTracker from other threads.
         if(Looper.myLooper()!=Looper.getMainLooper())return;
         if(isMonitoredDuplicate(e))return;
