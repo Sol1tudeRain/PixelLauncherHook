@@ -188,7 +188,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(underlying==null) {
             // Field names can be obfuscated, but the Android framework base
             // class of the receiver cannot be renamed.
-            Class<?> framework=android.view.InputEventReceiver.class;
+            Class<?> framework=Class.forName("android.view.InputEventReceiver");
             for(Class<?> c=wrapper.getClass();c!=null && underlying==null;c=c.getSuperclass()) {
                 for(Field field:c.getDeclaredFields()) {
                     if(!framework.isAssignableFrom(field.getType()))continue;
