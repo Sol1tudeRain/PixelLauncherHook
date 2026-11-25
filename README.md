@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.5
+# Pixel Launcher Double Tap 2.6
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -161,3 +161,11 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - 仍要求 HOME 手势目标、Launcher 已恢复、设置启用、未锁屏、没有浮层、触点位于空白 Workspace；不拦截或注入输入，保留滑动、多指、图标、Widget 与热座排除。
 - 新增有限条 `Home handoff event: source=Quickstep|Launcher action=ACTION_DOWN|ACTION_UP|ACTION_CANCEL focused=... downTime=... eventTime=... trackingDown=... firstTap=...`，不用坐标就能逐次定位首次点击有无完成。
 - 原 Root 锁屏命令、桌面设置开关、模块包名与签名证书不变。本版依然需要真机测试。
+
+## v2.6：去掉调试日志，保留运行错误
+
+- 在 v2.5 真机已验证“返回桌面动画期间双击空白锁屏”生效的基础上，不改变手势条件、Quickstep HOME 判定、双入口去重、页面命中检测、设置开关和 ROOT 锁屏方式。
+- 移除 Quickstep 原始触摸 DOWN/UP 的逐事件日志、输入门控和首次点击诊断、成功双击及成功锁屏日志、Hook 初始化成功日志、桌面设置 UI 详尽日志。
+- 删除相关日志计数器、已使用的跟踪集合、只为打印调试信息调用的部分代码；减少每次点击时的字符串拼接和日志 I/O。
+- 只保留 Hook/反射异常、输入接收器不可用、设置注入失败、Root 锁屏执行失败等真正的错误或关键故障日志，便于日后定位异常。
+- 应用 ID、原有签名、版本升级路径不变；保留低功耗事件驱动机制，不创建额外 InputMonitor、定时器、轮询或后台常驻服务。
