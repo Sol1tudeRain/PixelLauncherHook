@@ -124,6 +124,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private final HashSet<Class<?>> hookedMonitorReceiverClasses=new HashSet<>();
     private final WeakHashMap<Object,Boolean> selectedMonitorReceivers=new WeakHashMap<>();
     private int discoveredReceiverCount;
+    private int quickstepEventDiagnostics;
     private void installQuickstepInputHook(ClassLoader cl) {
         try {
             Class<?> wrapper=XposedHelpers.findClass(
@@ -242,10 +243,15 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
             trace("Quickstep monitor received raw ACTION_DOWN");
         Activity a=resumedLauncher;
-        if(a==null || a.hasWindowFocus() || a.isFinishing())return;
-        Long last=lastResumeTimes.get(a);
-        if(last==null)return;
-        long age=SystemClock.uptimeMillis()-last;
+        Long last=a==null ? null : lastResumeTimes.get(a);
+        long age=last==null ? Long.MAX_VALUE : SystemClock.uptimeMillis()-last;
+        boolean focused=a!=null && a.hasWindowFocus();
+        if(e.getActionMasked()==MotionEvent.ACTION_DOWN && quickstepEventDiagnostics++<16) {
+            XposedBridge.log(TAG+"Quickstep input gate: resumed="+(a!=null)
+                +" ageMs="+(age==Long.MAX_VALUE?"unknown":age)
+                +" focused="+focused+" action=DOWN");
+        }
+        if(a==null || focused || a.isFinishing())return;
         if(age<0 || age>EARLY_INPUT_WINDOW_MS)return;
         if(!LauncherSettingsHook.isEnabled(a))return;
         if(!isHome(a,true))return;
@@ -340,69 +346,56 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) {trace("keyguard active");return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
-        if(manager==null || !normalLauncherState(manager)) {trace("not NORMAL launcher state");return false;}
+        if(manager==null || !normalLauncherState(manager,prefocus)) {trace("not NORMAL launcher state");return false;}
         if(topOpen.invoke(null,a)!=null) {trace("floating view open");return false;}
         return true;
     }
     /**
-     * StateManager.isInStableState(NORMAL) waits for mCurrentStableState and
-     * transition completion. On return-home animations mState can already
-     * be NORMAL, while the previous stable state has not updated yet.
-     *
-     * Allow taps as soon as Launcher is targeting NORMAL, but never during
-     * an outgoing transition to All Apps or Overview. Keep the existing
-     * window-focus, visible Workspace, floating-view and hit tests.
+     * In a Quickstep return-to-home animation, mState can still refer to
+     * OVERVIEW while mConfig.targetState is already NORMAL. Requiring
+     * mState==NORMAL discards early empty taps. Only a verified NORMAL target
+     * can relax this check in the short pre-focus window; a null or foreign
+     * target never enables that path. Regular Launcher dispatch remains strict.
      */
-    private boolean normalLauncherState(Object manager) {
+    private boolean normalLauncherState(Object manager,boolean prefocus) {
         Object current;
         try {
             current=XposedHelpers.getObjectField(manager,"mState");
-        } catch(NoSuchFieldError ignored) {
-            try {
-                current=XposedHelpers.callMethod(manager,"getState");
-            } catch(NoSuchMethodError missing) {
-                // If this optimized build exposes neither state field nor getter,
-                // fail safely: the stable-state check is the only proof available.
+        } catch(NoSuchFieldError missingField) {
+            try {current=XposedHelpers.callMethod(manager,"getState");}
+            catch(NoSuchMethodError missingGetter) {
                 try {
                     return Boolean.TRUE.equals(XposedHelpers.callMethod(
                             manager,"isInStableState",normalState));
-                } catch(NoSuchMethodError alsoMissing) {
+                } catch(NoSuchMethodError missingAll) {
                     trace("Launcher current state unavailable; refusing double tap");
                     return false;
                 }
             }
         }
-        if(current!=normalState)return false;
-
-        // Reject outgoing transitions even if the visible workspace hasn't
-        // disappeared yet. Launcher3 stores the animation's destination here.
         Object target=null;
-        boolean targetKnown=false;
         try {
             Object config=XposedHelpers.getObjectField(manager,"mConfig");
-            if(config!=null) {
+            if(config!=null)
                 target=XposedHelpers.getObjectField(config,"targetState");
-                targetKnown=true;
-            }
-        } catch(NoSuchFieldError missing) { /* Device build may rename the field. */ }
-        if(!targetKnown) {
-            try {
-                target=XposedHelpers.callMethod(manager,"getTargetState");
-                targetKnown=true;
-            } catch(NoSuchMethodError ignored) { }
+        } catch(NoSuchFieldError missing) {
+            // Do not infer a NORMAL target when OEM fields are removed.
         }
-        if(targetKnown && target!=null && target!=normalState) {
-            trace("transition targets another Launcher state");
+        if(target==null) {
+            try {target=XposedHelpers.callMethod(manager,"getTargetState");}
+            catch(NoSuchMethodError ignored) { }
+        }
+        if(target!=null && target!=normalState) {
+            if(prefocus)trace("Quickstep early state rejected: target is not NORMAL");
             return false;
         }
-        // Confirm this is an incoming home transition without waiting for
-        // mCurrentStableState, which changes only when animation completes.
-        try {
-            if(!Boolean.TRUE.equals(XposedHelpers.callMethod(
-                    manager,"isInStableState",normalState)))
-                trace("NORMAL home accepted before stable transition ends");
-        } catch(NoSuchMethodError ignored) { }
-        return true;
+        if(current==normalState)return true;
+        if(prefocus && target==normalState) {
+            trace("Quickstep early home: state transitioning toward NORMAL");
+            return true;
+        }
+        if(prefocus)trace("Quickstep early state rejected: no confirmed NORMAL target");
+        return false;
     }
     private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
         if(!isHome(a,prefocus)) return null;
@@ -419,7 +412,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 Long resumedAt=lastResumeTimes.get(a);
                 long age=resumedAt==null ? Long.MAX_VALUE
                         : SystemClock.uptimeMillis()-resumedAt;
-                if(age<0 || age>HOME_RESUME_GRACE_MS) {
+                if(age<0 || age>(prefocus ? EARLY_INPUT_WINDOW_MS : HOME_RESUME_GRACE_MS)) {
                     trace("Workspace page transition blocks tap outside home-resume window");
                     return null;
                 }
