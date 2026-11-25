@@ -34,8 +34,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     // Short-lived pre-focus input handoff while Quickstep returns to home.
     private static final long EARLY_INPUT_WINDOW_MS=2000;
     private Activity resumedLauncher;
-    private long monitoredDownTime=-1, monitoredEventTime=-1;
-    private int monitoredAction=-1;
+    // Shared event identity for the Quickstep monitor / Launcher window.
+    // Both can see the same finger event around the focus handoff.
+    private long handledDownTime=-1, handledEventTime=-1;
+    private int handledAction=-1;
+    private int homeHandoffEventLogs;
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
@@ -75,9 +78,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         MotionEvent event=(MotionEvent)param.args[0];
                         // The system gesture monitor can see a touch shortly before
                         // the Launcher window takes focus. Never count it twice.
-                        if(isMonitoredDuplicate(event))return;
+                        if(isHandledDuplicate(event))return;
                         if(!a.hasWindowFocus())return;
-                        observe(a,event,param,false);
+                        boolean handoff=inHomeHandoff(a);
+                        if(handoff)logHomeHandoffEvent("Launcher",a,event);
+                        observe(a,event,param,handoff);
+                        markHandledEvent(event);
                     }
                     catch(Throwable e) { reset(a); report(e); }
                 }
@@ -85,7 +91,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     if (Boolean.TRUE.equals(param.getObjectExtra("launcherDoubleTap")) && !param.hasThrowable()) {
                         try {
                             Activity a=(Activity)param.thisObject;
-                            if (isHome(a)) sleep(a);
+                            if (isHome(a) || (inHomeHandoff(a) && isHome(a,true)))
+                                sleep(a);
                         } catch(Throwable e) { report(e); }
                     }
                 }
@@ -265,40 +272,63 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         return lastQuickstepHomeTargetAt>=0 && age>=0
                 && age<=QUICKSTEP_HOME_TARGET_MAX_AGE_MS;
     }
-    private boolean isMonitoredDuplicate(MotionEvent e) {
-        return e.getDownTime()==monitoredDownTime
-                && e.getEventTime()==monitoredEventTime
-                && e.getActionMasked()==monitoredAction;
+    private boolean isHandledDuplicate(MotionEvent e) {
+        return e.getDownTime()==handledDownTime
+                && e.getEventTime()==handledEventTime
+                && e.getActionMasked()==handledAction;
+    }
+    private void markHandledEvent(MotionEvent e) {
+        handledDownTime=e.getDownTime();
+        handledEventTime=e.getEventTime();
+        handledAction=e.getActionMasked();
+    }
+    private boolean inHomeHandoff(Activity a) {
+        Long resumedAt=lastResumeTimes.get(a);
+        if(resumedAt==null || !hasRecentQuickstepHomeTarget())return false;
+        long age=SystemClock.uptimeMillis()-resumedAt;
+        return age>=0 && age<=EARLY_INPUT_WINDOW_MS;
+    }
+    /**
+     * Event-by-event diagnostics during the early HOME transition.
+     * Limited to 80 events per Launcher process; never logs coordinates.
+     */
+    private void logHomeHandoffEvent(String source,Activity a,MotionEvent e) {
+        int action=e.getActionMasked();
+        if(action!=MotionEvent.ACTION_DOWN && action!=MotionEvent.ACTION_UP
+                && action!=MotionEvent.ACTION_CANCEL)return;
+        if(homeHandoffEventLogs++>=80)return;
+        TapTracker t=tracker(a);
+        XposedBridge.log(TAG+"Home handoff event: source="+source
+                +" action="+MotionEvent.actionToString(action)
+                +" focused="+a.hasWindowFocus()
+                +" downTime="+e.getDownTime()+" eventTime="+e.getEventTime()
+                +" trackingDown="+t.isDown()+" firstTap="+t.hasPrevious());
     }
     private void observeQuickstepInput(MotionEvent e) throws Exception {
-        // InputMonitorCompat normally dispatches Quickstep on the main looper;
-        // do not access View hierarchy or the TapTracker from other threads.
+        // The existing swipe-up monitor sees the gesture while the Launcher
+        // window gains focus. Continue through that handoff so the DOWN and UP
+        // cannot be split between two independent event streams.
         if(Looper.myLooper()!=Looper.getMainLooper())return;
-        if(isMonitoredDuplicate(e))return;
         if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
             trace("Quickstep monitor received raw ACTION_DOWN");
         Activity a=resumedLauncher;
-        Long last=a==null ? null : lastResumeTimes.get(a);
-        long age=last==null ? Long.MAX_VALUE : SystemClock.uptimeMillis()-last;
+        Long resumedAt=a==null?null:lastResumeTimes.get(a);
+        long age=resumedAt==null?Long.MAX_VALUE:SystemClock.uptimeMillis()-resumedAt;
         boolean focused=a!=null && a.hasWindowFocus();
         if(e.getActionMasked()==MotionEvent.ACTION_DOWN && quickstepEventDiagnostics++<16) {
             XposedBridge.log(TAG+"Quickstep input gate: resumed="+(a!=null)
-                +" ageMs="+(age==Long.MAX_VALUE?"unknown":age)
-                +" focused="+focused+" homeGesture="+hasRecentQuickstepHomeTarget()
-                +" action=DOWN");
+                    +" ageMs="+(age==Long.MAX_VALUE?"unknown":age)
+                    +" focused="+focused
+                    +" homeGesture="+hasRecentQuickstepHomeTarget()
+                    +" action=DOWN");
         }
-        if(a==null || focused || a.isFinishing())return;
-        if(age<0 || age>EARLY_INPUT_WINDOW_MS)return;
+        if(a==null || a.isFinishing() || !inHomeHandoff(a))return;
         if(!LauncherSettingsHook.isEnabled(a))return;
+        if(isHandledDuplicate(e))return;
         if(!isHome(a,true))return;
-        // Only mark accepted pre-focus events: normal window dispatch may
-        // still receive the same MotionEvent during a focus handoff.
-        monitoredDownTime=e.getDownTime();
-        monitoredEventTime=e.getEventTime();
-        monitoredAction=e.getActionMasked();
-        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
-            trace("Quickstep touch received before Launcher window focus");
+        logHomeHandoffEvent("Quickstep",a,e);
         observe(a,e,null,true);
+        markHandledEvent(e);
     }
     private static Method findDispatch(Class<?> c) throws NoSuchMethodException {
         for (;c!=null;c=c.getSuperclass()) {
@@ -350,9 +380,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 if(t.isDown()) {
                     View page=emptyPage(a,x,y,prefocus);
                     if(t.finish(e.getEventTime(),x,y,page)) {
-                        if(prefocus) {
+                        if(p==null) {
                             if(isHome(a,true)) {
-                                trace("Quickstep pre-focus DOUBLE TAP ACCEPTED");
+                                trace("Quickstep HOME handoff DOUBLE TAP ACCEPTED");
                                 sleep(a);
                             }
                         } else {
@@ -375,8 +405,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     }
     private boolean isHome(Activity a) throws Exception {return isHome(a,false);}
     private boolean isHome(Activity a,boolean prefocus) throws Exception {
-        if(a.isFinishing() || (!prefocus && !a.hasWindowFocus())
-                || (prefocus && a.hasWindowFocus())) {
+        // Early HOME input can continue after focus is obtained. The caller
+        // must have already verified the recent Quickstep HOME destination.
+        if(a.isFinishing() || (!prefocus && !a.hasWindowFocus())) {
             trace("not focused or finishing");return false;
         }
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
