@@ -180,7 +180,10 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG+"Quickstep monitor receiver created: name="
                     +(name==null?"unknown":name)+" argc="+args.length);
         }
-        if(!"swipe-up".equals(name))return;
+        // PixelOS names its per-display gesture monitor "swipe-up-disp0".
+        // Match only Quickstep's known swipe-up pattern, not unrelated monitors.
+        if(name==null || !name.matches("swipe-up(?:-disp[0-9]+)?"))return;
+        XposedBridge.log(TAG+"Quickstep swipe-up monitor matched: "+name);
 
         Object underlying=null;
         try {underlying=XposedHelpers.getObjectField(wrapper,"mReceiver");}
