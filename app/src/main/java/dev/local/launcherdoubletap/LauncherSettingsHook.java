@@ -30,7 +30,6 @@ final class LauncherSettingsHook {
             Collections.newSetFromMap(new WeakHashMap<Object, Boolean>());
     private static volatile Context launcherApplication;
 
-
     private LauncherSettingsHook() {}
 
     static boolean isEnabled(Context context) {
@@ -48,7 +47,7 @@ final class LauncherSettingsHook {
         Class<?> twoState = XposedHelpers.findClassIfExists(
                 "androidx.preference.TwoStatePreference", loader);
         if(twoState!=null) {
-            java.util.Set<XC_MethodHook.Unhook> hooks=XposedBridge.hookAllMethods(
+            XposedBridge.hookAllMethods(
                     twoState,"setChecked",new XC_MethodHook() {
                 @Override protected void afterHookedMethod(MethodHookParam param) {
                     if(param.hasThrowable() || param.args.length!=1
@@ -58,10 +57,10 @@ final class LauncherSettingsHook {
                     if(app==null)return;
                     boolean enabled=(Boolean)param.args[0];
                     preferences(app).edit().putBoolean(KEY,enabled).apply();
-                    XposedBridge.log(TAG+"Double tap lock "+(enabled?"enabled":"disabled"));
+
                 }
             });
-            XposedBridge.log(TAG+"TwoStatePreference.setChecked hooks="+hooks.size());
+
         } else {
             XposedBridge.log(TAG+"No TwoStatePreference found; toggle changes cannot be persisted");
         }
@@ -81,7 +80,7 @@ final class LauncherSettingsHook {
                 }
             }
         });
-        XposedBridge.log(TAG + "Home settings hook installed");
+
     }
 
     /**
@@ -114,10 +113,9 @@ final class LauncherSettingsHook {
             XposedHelpers.callMethod(target, method, value);
         } catch (NoSuchMethodError ignored) {
             XposedHelpers.setObjectField(target, field, value);
-            XposedBridge.log(TAG + method + " optimized away; assigned " + field + " directly");
+
         }
     }
-
 
     /** Find an existing working Launcher switch, including those inside preference groups. */
     private static Object findNativeSwitch(Object parent, Class<?> twoState, ClassLoader loader,
@@ -150,13 +148,8 @@ final class LauncherSettingsHook {
             try {
                 int value=XposedHelpers.getIntField(source,field);
                 if(value>0)XposedHelpers.setIntField(destination,field,value);
-            } catch(Throwable e) { XposedBridge.log(TAG+"Copy "+field+" unavailable: "+e); }
+            } catch(Throwable ignored) { /* Optional layout field. */ }
         }
-        try {
-            XposedBridge.log(TAG+"Switch layout copied from "+source.getClass().getName()
-                    +" widget="+XposedHelpers.getIntField(destination,"mWidgetLayoutResId")
-                    +" row="+XposedHelpers.getIntField(destination,"mLayoutResId"));
-        } catch(Throwable ignored) { }
     }
 
     private static void addSwitch(Object fragment, ClassLoader loader) throws Exception {
@@ -182,7 +175,7 @@ final class LauncherSettingsHook {
         Object toggle=null;
         if(template!=null) {
             try { toggle=newSwitchPreference(template.getClass(),activity); }
-            catch(Exception e) { XposedBridge.log(TAG+"Native switch constructor unavailable: "+e); }
+            catch(Exception ignored) { /* Use compatible switch fallback. */ }
         }
         if(toggle==null) {
             // Fallback preserves the class/widget pairing rather than copying an
@@ -194,9 +187,6 @@ final class LauncherSettingsHook {
         if(template!=null && template.getClass()==toggle.getClass()) {
             copyNativePreferenceLayout(template,toggle);
         }
-        XposedBridge.log(TAG+"Preference widget pairing: template="+
-                (template==null ? "none" : template.getClass().getName())
-                +" actual="+toggle.getClass().getName());
         // No icon is supplied. Match Pixel Launcher's other settings rows (no empty
         // icon column), irrespective of the Preference default style.
         try { XposedHelpers.setBooleanField(toggle,"mIconSpaceReserved",false); }
@@ -209,7 +199,7 @@ final class LauncherSettingsHook {
         // setPersistent(boolean) is removed in this optimized PixelOS Launcher.
         // Prefer the backing field; our dedicated SharedPreferences remains authoritative.
         try { XposedHelpers.setBooleanField(toggle, "mPersistent", false); }
-        catch (Throwable ignored) { XposedBridge.log(TAG + "mPersistent field unavailable, using Launcher default preference persistence"); }
+        catch (Throwable ignored) { /* Launcher persistence fallback. */ }
         try { XposedHelpers.callMethod(toggle, "setOrder", -100); }
         catch (NoSuchMethodError ignored) {
             try { XposedHelpers.setIntField(toggle, "mOrder", -100); }
@@ -230,7 +220,5 @@ final class LauncherSettingsHook {
         launcherApplication=activity.getApplicationContext();
         XposedHelpers.callMethod(screen, "addPreference", toggle);
         INJECTED_SWITCHES.add(toggle);
-        XposedBridge.log(TAG + "Native home settings toggle added; referenceSwitch="+(template!=null)
-                +" switchClass="+toggle.getClass().getName());
     }
 }
