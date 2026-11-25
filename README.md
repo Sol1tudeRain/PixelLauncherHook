@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.3
+# Pixel Launcher Double Tap 2.4
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -142,3 +142,13 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - Quickstep 预焦点通道的 `Workspace.isPageInTransition()` 宽限与预焦点 2 秒窗口同步；普通桌面则仍沿用 1.2 秒页面过渡保护。滑动距离、多指输入、图标、Widget、浮层和锁屏检查均保留。
 - 增加有限条、不记录屏幕坐标的 `Quickstep input gate: resumed=... ageMs=... focused=...` 日志，以及状态原因 `Quickstep early home: state transitioning toward NORMAL` / `Quickstep early state rejected: ...`。
 - 保留 v2.2 的 Quickstep 输入 Hook、原 Root 休眠命令、系统桌面设置开关和固定签名。本版的改善仍需你的 PixelOS 真机验证。
+
+## v2.4：以 Quickstep 的 HOME 手势目标判断返回桌面
+
+v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook，部分 ACTION_DOWN 出现在 Launcher onResume 后 260～319ms 且尚未获得窗口焦点，但 StateManager 无法提供明确 NORMAL 目标，导致 early state rejected。
+
+- 新版 Hook GestureState.setEndTarget，捕获 Quickstep 手势真正决定进入 HOME 的信号，不再仅依赖可能缺失的 StateManager.mConfig.targetState。
+- 只有 HOME 信号发生在 2.4 秒以内、Launcher 已恢复且尚无焦点、没有其他目标状态、未锁屏、设置开关开启、触点为空白 Workspace 时，才允许提前双击。RECENTS、NEW_TASK、LAST_TASK、ALL_APPS 将清除 HOME 标记；Launcher onPause 也清除。
+- 保留原有图标/Widget/浮层、多指与滑动排除及 ROOT 锁屏流程。未获明确 HOME 信号时保守拒绝，不会把所有返回动画当作桌面。
+- 新日志：Quickstep gesture end-target hooks=N / Quickstep gesture destination HOME confirmed / Quickstep input gate: homeGesture=true/false / Quickstep early home: confirmed HOME gesture while launcher state lags。
+- 仍须真机验证，具体 ROM 可能优化了 GestureState.setEndTarget，届时仍可通过日志判断是否成功。
