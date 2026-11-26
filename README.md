@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 3.0 Tap Diagnostic
+# Pixel Launcher Double Tap 3.1 Home Gate Diagnostic
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -202,3 +202,7 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - v3.0 只对已确认的侧边返回短窗口输出 `TAP DOWN/UP` 记录，包含来源（Launcher/Quickstep）、空白页面通过情况和明确原因、tracker 当前是否正在跟踪、是否保留首次点击、是否构成双击。只记录成功/失败原因，不记录触摸位置、应用包名、按键内容。`BACK_DIAG` 总量最多 150 条/进程。
 - 将 Workspace 失败检查标记为 `homeGate`、`noWorkspace`、`outsideWorkspace`、`workspacePageTransition`、`cellOverlay`、`noShortcutGrid`、`iconOrWidget`、`overlappingPage`、`hotseatSearch`、`foregroundOverlay`、`noMatchingCellLayout`。不修改返回首页的处理条件，也不放宽防误触边界。
 - 在返回动画前后尝试双击后，运行 `su -c 'p=$(pidof com.google.android.apps.nexuslauncher); grep -hF "BACK_DIAG" /data/adb/lspd/log/verbose_*.log | grep " $p:" | tail -n 100'`。此版专供找问题，确认原因后换回无诊断日志版本。
+
+## v3.1 临时 HOME 检查诊断
+
+真机 v3.0 日志已证明侧边返回时动画 Hook/交接成功，但第一下 TAP DOWN 被 `homeGate` 拒绝；随后第二下能通过，证明问题是早期短暂拒绝。v3.1 完全不改变任何识别或锁屏规则，只对**已确认返回桌面**的短窗口补充失败理由：Activity 是否 finishing、是否缺失或处于锁屏状态、Launcher StateManager 是否无效、以及 `AbstractFloatingView.getTopOpenView()` 返回的实际控件类名。所有拒绝仍与 v3.0 相同，日志限制 150 条/进程，不打印触摸坐标或内容。建议仅在本机复现后查看 `BACK_DIAG isHome reject:` 行，定位具体拦截因素，后续换回去调试日志的正式版。
