@@ -507,6 +507,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 Long resumedAt=lastResumeTimes.get(a);
                 long age=resumedAt==null ? Long.MAX_VALUE
                         : SystemClock.uptimeMillis()-resumedAt;
+                // Predictive BACK may keep Launcher paused until animation
+                // completes, so its page transition grace must use the
+                // committed back timestamp rather than the stale onResume.
+                if(prefocus && hasRecentBackReturn(a))
+                    age=SystemClock.uptimeMillis()-lastBackReturnCommitAt;
                 if(age<0 || age>(prefocus ? EARLY_INPUT_WINDOW_MS : HOME_RESUME_GRACE_MS)) {
                     return null;
                 }
