@@ -45,7 +45,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
     private Class<?> launcherClass, workspaceClass, cellClass, containerClass, floatingClass;
-    private Object normalState;
+    private Object normalState, backgroundAppState;
     private Method topOpen;
     private final Rect rect=new Rect();
     private final int[] screen=new int[2];
@@ -62,6 +62,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             floatingClass=XposedHelpers.findClass("com.android.launcher3.AbstractFloatingView",cl);
             Class<?> state=XposedHelpers.findClass("com.android.launcher3.LauncherState",cl);
             normalState=XposedHelpers.getStaticObjectField(state,"NORMAL");
+            try { backgroundAppState=XposedHelpers.getStaticObjectField(state,"BACKGROUND_APP"); }
+            catch(NoSuchFieldError ignored) { /* Device-specific Launcher may optimize it. */ }
             for (Method m:floatingClass.getDeclaredMethods()) {
                 if (m.getName().equals("getTopOpenView") && Modifier.isStatic(m.getModifiers())
                         && m.getParameterCount()==1 && m.getParameterTypes()[0].isAssignableFrom(launcherClass)) {
@@ -431,7 +433,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) {return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
-        if(manager==null || !normalLauncherState(manager,prefocus)) {return false;}
+        if(manager==null || !normalLauncherState(manager,prefocus,a)) {return false;}
         if(topOpen.invoke(null,a)!=null) {return false;}
         return true;
     }
@@ -442,7 +444,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
      * can relax this check in the short pre-focus window; a null or foreign
      * target never enables that path. Regular Launcher dispatch remains strict.
      */
-    private boolean normalLauncherState(Object manager,boolean prefocus) {
+    private boolean normalLauncherState(Object manager,boolean prefocus,Activity launcher) {
         Object current;
         try {
             current=XposedHelpers.getObjectField(manager,"mState");
@@ -469,21 +471,25 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             try {target=XposedHelpers.callMethod(manager,"getTargetState");}
             catch(NoSuchMethodError ignored) { }
         }
-        if(target!=null && target!=normalState) {
+        final boolean committedBack=prefocus && hasRecentBackReturn(launcher);
+        // During predictive back, Launcher may still be in BACKGROUND_APP
+        // until its closing-app animation completes. This exception is never
+        // enabled for ALL_APPS, OVERVIEW or an unconfirmed/cancelled back.
+        if(target!=null && target!=normalState
+                && !(committedBack && backgroundAppState!=null
+                     && target==backgroundAppState)) {
             return false;
         }
         if(current==normalState)return true;
-        if(prefocus && target==normalState) {
+        if(prefocus && target==normalState)return true;
+        if(committedBack && backgroundAppState!=null
+                && (current==backgroundAppState || target==backgroundAppState))
             return true;
-        }
-        // Quickstep's HOME gesture is a stronger indication of the actual
-        // destination than a nullable/optimized StateManager target. Only
-        // the currently resumed, unfocused launcher can use this exemption.
-        if(prefocus && target==null
-                && (hasRecentQuickstepHomeTarget()
-                    || hasRecentBackReturn(backReturningLauncher))) {
-            return true;
-        }
+        // Some optimized builds expose no target during the return animation.
+        // Require either explicit HOME gesture or committed back-to-home
+        // evidence; never infer HOME from the onResume timestamp alone.
+        if(prefocus && target==null && (hasRecentQuickstepHomeTarget()
+                || committedBack))return true;
         return false;
     }
     private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
