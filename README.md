@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.6
+# Pixel Launcher Double Tap 2.7
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -169,3 +169,13 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - 删除相关日志计数器、已使用的跟踪集合、只为打印调试信息调用的部分代码；减少每次点击时的字符串拼接和日志 I/O。
 - 只保留 Hook/反射异常、输入接收器不可用、设置注入失败、Root 锁屏执行失败等真正的错误或关键故障日志，便于日后定位异常。
 - 应用 ID、原有签名、版本升级路径不变；保留低功耗事件驱动机制，不创建额外 InputMonitor、定时器、轮询或后台常驻服务。
+
+## v2.7：支持侧边返回手势回桌面期间双击锁屏
+
+- 保留已在 PixelOS 上确认可用的上滑返回桌面 Quickstep HOME 目标判断、双路径触摸去重、桌面空白区域识别、系统原生设置开关与原 Root 锁屏方式。
+- **预测性返回**：Hook `com.android.quickstep.LauncherBackAnimationController.startTransition()`，仅在已确认存在离开应用的动画目标、真正提交返回动画时记录目标 Launcher；不会因 `onBackStarted`、进度变化或取消返回而触发。
+- **旧式返回动画**：额外 Hook `com.android.launcher3.QuickstepTransitionManager.createWallpaperOpenAnimations()`，仅在非解锁并有关闭中的 App target 时允许视为返回桌面（某些 ROM 可能优化或缺失这一入口）。
+- 返回手势不会触发 `GestureState.setEndTarget(HOME)`，且预测性返回可能直到动画完全结束才调用 `Launcher.onResume()`。v2.7 改为在刚确认的返回动画短窗口（2.4 秒）内，也能使用控制器持有的 Launcher 对象检查 Workspace 并处理触摸。
+- 当 `LauncherState` 暂时仍为 `BACKGROUND_APP` 时，只有**已确认返回 HOME**的短窗口才允许早期检测；`ALL_APPS`、`OVERVIEW` 等仍被拒绝。
+- `Workspace.isPageInTransition` 的时间宽限在侧边返回场景改用返回提交时间，避免取到上次打开桌面的过期 `onResume()` 时间。
+- 不拦截系统手势、不创建新的 InputMonitor 或后台定时轮询。仍保留双击时间/移动距离限制，排除图标、Widget、浮窗、锁屏和多指。默认关闭详细日志，只留有用的失败信息。**实际效果需要真机安装验证**。
