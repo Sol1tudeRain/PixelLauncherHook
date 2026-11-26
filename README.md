@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 1.9
+# Pixel Launcher Double Tap 2.7
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -107,3 +107,75 @@ su -c 'grep -hF "[LauncherDoubleTap]" /data/adb/lspd/log/verbose_*.log | tail -n
 - 这仍是需要真机验证的实验性机制；InputMonitor 不保证在所有 PixelOS 版本都覆盖动画期间的触摸。保留包名、稳定签名、设置入口和旧 Root 锁屏执行方式。
 
 对应 AOSP 实现：[TouchInteractionService.java](https://android.googlesource.com/platform/packages/apps/Launcher3/+/f41858c23c5e7a7fbb14d0df6ab041154ec456ab/quickstep/src/com/android/quickstep/TouchInteractionService.java)。
+
+## v2.0：适配 Pixel Launcher 优化后的 Quickstep 输入回调
+
+- v1.9 在实际 PixelOS 日志中报告 `NoSuchMethodException: TouchInteractionService.onInputEvent(InputEvent)`，导致提前手势入口未安装。
+- 不再只通过固定私有方法名 Hook，而是监听现有 `InputChannelCompat.InputEventReceiver` 的创建过程，从接收器构造函数参数定位实际 `InputEvent` 监听器，且只允许 Quickstep 相关调用栈或类名。
+- 对监听器类中的实际 `InputEvent` 回调 Hook，兼容经过优化和重命名的回调实现；同时扫描 TouchInteractionService 中实际存在的 `InputEvent` 方法作为兼容回退。
+- 去重来自多个入口的同一个触摸事件；观察而不修改输入，不创建新的输入监视器。
+- 新日志：`Quickstep receiver constructor hooks=N`、`Quickstep monitor listener hook installed`、`Quickstep monitor received raw ACTION_DOWN`。如果监听器未找到，日志可明确区分“接收器未创建”和“已创建但过滤未通过”。
+- 其余 Launcher 状态、Workspace 空白排除和 Root 锁屏逻辑保持不变。未经真机验证 Quickstep 观察到的事件是否覆盖返回桌面动画，故此机制仍属实验性。
+
+参考 AOSP [InputChannelCompat](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SystemUI/shared/src/com/android/systemui/shared/system/InputChannelCompat.java) 和 [InputMonitorCompat](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/packages/SystemUI/shared/src/com/android/systemui/shared/system/InputMonitorCompat.java)。
+
+## v2.1：直接观察 Quickstep 的实际输入接收器（实验性）
+
+- v2.0 日志显示 `Quickstep receiver constructor hooks=1`，但没有 `Quickstep monitor listener hook installed`。构造函数 Hook 已注册，不代表监听器回调被找到，Quickstep lambda 经 R8 混淆/内联后可能无法按类名和调用栈识别。
+- 直接在 `InputChannelCompat.InputEventReceiver` **构造完成后**查找其实际 `mReceiver`（或以 Android framework 的 `InputEventReceiver` 类型反射发现），只对名称 `swipe-up` 的接收器对象添加监听；对其框架回调覆写 `onInputEvent(InputEvent)` 安装 Hook，不再依赖混淆的 listener lambda。
+- 限制到具体的 Quickstep receiver **实例**，不拦截其他输入监视器。仅读取输入事件，不吞触摸、不注入事件、不改变导航逻辑；避免系统手势受到影响。
+- 加入日志 `Quickstep monitor receiver created: name=... argc=...`、`Quickstep swipe-up BatchedInputEventReceiver hook installed`、`Quickstep monitor received raw ACTION_DOWN`。用来判断接收器是否被创建、名称是否符合以及是否收到触摸。
+- 当前依旧只在返回桌面 2 秒内，Launcher 已恢复、尚未获得焦点且无遮挡、当前处于 NORMAL 状态时尝试提前双击；其余触摸均沿用 v1.8 正常桌面处理。
+- 原 Root 锁屏、设置开关、应用 ID 和签名证书不变。尚需真机检查优化后的 PixelOS 是否创建该接收器、真实输入的坐标范围以及返回动画时状态。
+
+## v2.2：修复 PixelOS Quickstep 监视器名称匹配
+
+- v2.1 的 PixelOS 日志确认监视器是 `swipe-up-disp0`（每个显示器一个），但 v2.1 只接受字符串 `swipe-up`，因此接收器被提前跳过。
+- v2.2 精确接受 `swipe-up` 或 `swipe-up-dispN`（N 为数字）来兼容每显示器命名，不扩大到其他监视器。
+- 新增 `Quickstep swipe-up monitor matched` 诊断，之后应继续出现 `Quickstep swipe-up BatchedInputEventReceiver hook installed`，若无法获取底层输入接收器则会明确打印原因。
+- 本次保持原生设置开关、稳定签名、Launcher 普通桌面手势和 KernelSU Root 锁屏逻辑不变。动画期间提前锁屏仍需真机验证。
+
+## v2.3：在返回桌面动画目标明确为 NORMAL 时提前接收双击
+
+- v2.2 真机验证：成功 Hook `swipe-up-disp0` 的 `BatchedInputEventReceiver.onInputEvent`，并收到 `Quickstep monitor received raw ACTION_DOWN`。但之后出现 `not NORMAL launcher state`，说明一些返回动画早期事件仍被错误拒绝。
+- 仅对 Quickstep 预焦点输入、Launcher 恢复后 2 秒内、当前窗口尚未取得焦点的情形，若能反射验证 `StateManager.mConfig.targetState == LauncherState.NORMAL`，即使当前 `mState` 还未切至 NORMAL，也允许后续空白触点判断；缺少明确 NORMAL 目标则继续拒绝。
+- Quickstep 预焦点通道的 `Workspace.isPageInTransition()` 宽限与预焦点 2 秒窗口同步；普通桌面则仍沿用 1.2 秒页面过渡保护。滑动距离、多指输入、图标、Widget、浮层和锁屏检查均保留。
+- 增加有限条、不记录屏幕坐标的 `Quickstep input gate: resumed=... ageMs=... focused=...` 日志，以及状态原因 `Quickstep early home: state transitioning toward NORMAL` / `Quickstep early state rejected: ...`。
+- 保留 v2.2 的 Quickstep 输入 Hook、原 Root 休眠命令、系统桌面设置开关和固定签名。本版的改善仍需你的 PixelOS 真机验证。
+
+## v2.4：以 Quickstep 的 HOME 手势目标判断返回桌面
+
+v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook，部分 ACTION_DOWN 出现在 Launcher onResume 后 260～319ms 且尚未获得窗口焦点，但 StateManager 无法提供明确 NORMAL 目标，导致 early state rejected。
+
+- 新版 Hook GestureState.setEndTarget，捕获 Quickstep 手势真正决定进入 HOME 的信号，不再仅依赖可能缺失的 StateManager.mConfig.targetState。
+- 只有 HOME 信号发生在 2.4 秒以内、Launcher 已恢复且尚无焦点、没有其他目标状态、未锁屏、设置开关开启、触点为空白 Workspace 时，才允许提前双击。RECENTS、NEW_TASK、LAST_TASK、ALL_APPS 将清除 HOME 标记；Launcher onPause 也清除。
+- 保留原有图标/Widget/浮层、多指与滑动排除及 ROOT 锁屏流程。未获明确 HOME 信号时保守拒绝，不会把所有返回动画当作桌面。
+- 新日志：Quickstep gesture end-target hooks=N / Quickstep gesture destination HOME confirmed / Quickstep input gate: homeGesture=true/false / Quickstep early home: confirmed HOME gesture while launcher state lags。
+- 仍须真机验证，具体 ROM 可能优化了 GestureState.setEndTarget，届时仍可通过日志判断是否成功。
+
+## v2.5：跨焦点交接保留双击状态
+
+- v2.4 PixelOS 真机日志显示 HOME 已确认，Quickstep 在 Launcher 无窗口焦点时看到空白区域 DOWN；155ms 后 Launcher 有了焦点，但没有构成有效双击。旧版 Quickstep 路径在检测到 `hasWindowFocus()==true` 时直接 return，可能造成 DOWN/UP 分别由两种入口处理。
+- v2.5 在 `onResume` 后 2 秒且近期 Quickstep 的 `GestureState` 已确认 HOME 目标的短窗口，Quickstep 的 swipe-up 输入回调**跨越焦点交接继续观察**触摸，并和 Launcher.dispatchTouchEvent 使用同一个 TapTracker。
+- 依据 DOWN 时间、事件时间及动作，去重两条路径可能重复派发的同一个事件；如果 Quickstep 没观察到事件，Launcher 的正常分发路径仍可继续处理。焦点交接不再直接排除早期 HOME 触摸。
+- 仍要求 HOME 手势目标、Launcher 已恢复、设置启用、未锁屏、没有浮层、触点位于空白 Workspace；不拦截或注入输入，保留滑动、多指、图标、Widget 与热座排除。
+- 新增有限条 `Home handoff event: source=Quickstep|Launcher action=ACTION_DOWN|ACTION_UP|ACTION_CANCEL focused=... downTime=... eventTime=... trackingDown=... firstTap=...`，不用坐标就能逐次定位首次点击有无完成。
+- 原 Root 锁屏命令、桌面设置开关、模块包名与签名证书不变。本版依然需要真机测试。
+
+## v2.6：去掉调试日志，保留运行错误
+
+- 在 v2.5 真机已验证“返回桌面动画期间双击空白锁屏”生效的基础上，不改变手势条件、Quickstep HOME 判定、双入口去重、页面命中检测、设置开关和 ROOT 锁屏方式。
+- 移除 Quickstep 原始触摸 DOWN/UP 的逐事件日志、输入门控和首次点击诊断、成功双击及成功锁屏日志、Hook 初始化成功日志、桌面设置 UI 详尽日志。
+- 删除相关日志计数器、已使用的跟踪集合、只为打印调试信息调用的部分代码；减少每次点击时的字符串拼接和日志 I/O。
+- 只保留 Hook/反射异常、输入接收器不可用、设置注入失败、Root 锁屏执行失败等真正的错误或关键故障日志，便于日后定位异常。
+- 应用 ID、原有签名、版本升级路径不变；保留低功耗事件驱动机制，不创建额外 InputMonitor、定时器、轮询或后台常驻服务。
+
+## v2.7：支持侧边返回手势回桌面期间双击锁屏
+
+- 保留已在 PixelOS 上确认可用的上滑返回桌面 Quickstep HOME 目标判断、双路径触摸去重、桌面空白区域识别、系统原生设置开关与原 Root 锁屏方式。
+- **预测性返回**：Hook `com.android.quickstep.LauncherBackAnimationController.startTransition()`，仅在已确认存在离开应用的动画目标、真正提交返回动画时记录目标 Launcher；不会因 `onBackStarted`、进度变化或取消返回而触发。
+- **旧式返回动画**：额外 Hook `com.android.launcher3.QuickstepTransitionManager.createWallpaperOpenAnimations()`，仅在非解锁并有关闭中的 App target 时允许视为返回桌面（某些 ROM 可能优化或缺失这一入口）。
+- 返回手势不会触发 `GestureState.setEndTarget(HOME)`，且预测性返回可能直到动画完全结束才调用 `Launcher.onResume()`。v2.7 改为在刚确认的返回动画短窗口（2.4 秒）内，也能使用控制器持有的 Launcher 对象检查 Workspace 并处理触摸。
+- 当 `LauncherState` 暂时仍为 `BACKGROUND_APP` 时，只有**已确认返回 HOME**的短窗口才允许早期检测；`ALL_APPS`、`OVERVIEW` 等仍被拒绝。
+- `Workspace.isPageInTransition` 的时间宽限在侧边返回场景改用返回提交时间，避免取到上次打开桌面的过期 `onResume()` 时间。
+- 不拦截系统手势、不创建新的 InputMonitor 或后台定时轮询。仍保留双击时间/移动距离限制，排除图标、Widget、浮窗、锁屏和多指。默认关闭详细日志，只留有用的失败信息。**实际效果需要真机安装验证**。
