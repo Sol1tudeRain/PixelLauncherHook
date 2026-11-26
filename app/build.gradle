@@ -11,8 +11,8 @@ android {
         applicationId 'dev.local.launcherdoubletap'
         minSdk 31
         targetSdk 35
-        versionCode 21
-        versionName '3.0-tap-diagnostic'
+        versionCode 22
+        versionName '3.1-home-gate-diagnostic'
     }
     signingConfigs {
         if (hasStableSigning) {
