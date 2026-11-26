@@ -26,6 +26,8 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class LauncherHook implements IXposedHookLoadPackage {
     private static final String TARGET="com.google.android.apps.nexuslauncher";
     private static final String TAG="[LauncherDoubleTap] ";
+    private static final String ANIMATION_LISTENER_CLASS=
+            "com.android.launcher3.views.ListenerView";
     private final WeakHashMap<Activity,TapTracker> trackers=new WeakHashMap<>();
     private final WeakHashMap<Activity,Long> lastResumeTimes=new WeakHashMap<>();
     private static final long HOME_RESUME_GRACE_MS=1200;
@@ -438,8 +440,53 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(km==null || km.isKeyguardLocked()) {return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
         if(manager==null || !normalLauncherState(manager,prefocus,a)) {return false;}
-        if(topOpen.invoke(null,a)!=null) {return false;}
+        Object popup=topOpen.invoke(null,a);
+        if(popup!=null && !isIgnorableBackAnimationListener(a,popup))return false;
         return true;
+    }
+    /**
+     * Launcher3 uses an invisible ListenerView while a FloatingIconView
+     * animation finishes. It listens for a DOWN to finish the animation but
+     * deliberately does not intercept the touch itself. Thus, rejecting
+     * this view as a regular popup discards the first tap during a committed
+     * back-to-home animation.
+     *
+     * Never ignore any other floating view. Only during a verified back
+     * return, for the exact invisible ListenerView class, and after checking
+     * there are no OTHER open AbstractFloatingViews in the window tree.
+     * Regular desktop, swipe-up HOME, folders, popups and widgets remain
+     * strictly protected.
+     */
+    private boolean isIgnorableBackAnimationListener(Activity a,Object popup) {
+        if(!hasRecentBackReturn(a) ||
+                !ANIMATION_LISTENER_CLASS.equals(popup.getClass().getName()) ||
+                !(popup instanceof View) ||
+                ((View)popup).getVisibility()!=View.GONE)return false;
+        try {
+            View root=a.getWindow().getDecorView();
+            return root!=null && !hasOtherOpenFloatingView(root,0);
+        } catch(Throwable ignored) {
+            // Missing view state is NOT permission to relax popup checks.
+            return false;
+        }
+    }
+    private boolean hasOtherOpenFloatingView(View node,int depth) {
+        if(depth>32)return true; // Fail closed on an unexpected hierarchy.
+        if(floatingClass.isInstance(node)
+                && !ANIMATION_LISTENER_CLASS.equals(node.getClass().getName())) {
+            try {
+                if(Boolean.TRUE.equals(XposedHelpers.callMethod(node,"isOpen")))
+                    return true;
+            } catch(Throwable ignored) {
+                return true;
+            }
+        }
+        if(node instanceof ViewGroup) {
+            ViewGroup group=(ViewGroup)node;
+            for(int i=0;i<group.getChildCount();i++)
+                if(hasOtherOpenFloatingView(group.getChildAt(i),depth+1))return true;
+        }
+        return false;
     }
     /**
      * In a Quickstep return-to-home animation, mState can still refer to
