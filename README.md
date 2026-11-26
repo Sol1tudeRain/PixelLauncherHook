@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.9 Diagnostic
+# Pixel Launcher Double Tap 3.0 Tap Diagnostic
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -194,3 +194,11 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - 在预测性返回控制器和 legacy wallpaper open animation 的 Hook 注册及触发、Launcher 的 onResume/onPause、Quickstep 输入的短窗口以及 Launcher 状态过滤中写出 `BACK_DIAG` 日志。
 - 每个 Launcher 进程最多 110 条诊断记录，不打印屏幕坐标、应用包名或文本内容；正常使用后建议换回最终无调试日志版本。
 - 安装后重启 Pixel Launcher，从应用侧滑返回桌面并在动画期间双击；获取当前 Launcher 进程日志中 `BACK_DIAG` 开头的行，检查实际入口以及卡在何处。
+
+## v3.0 临时双击诊断
+
+- v2.9 日志已确认：从应用侧边返回桌面时，`QuickstepTransitionManager.createWallpaperOpenAnimations` 被调用，存在正在关闭的应用、目标为 Launcher，`BACK COMMITTED` 正确记录，Launcher 状态为 `Normal`，并收到间隔约 172 ms 的两次 `DOWN`。
+- v2.9 原来在 `normalLauncherState()` 每次被询问时打印状态，移动事件大量占用限量日志，无法知道 `ACTION_UP` 是否触发、TapTracker 是否记录第一次点击、Workspace 是否将空白点击拒绝。
+- v3.0 只对已确认的侧边返回短窗口输出 `TAP DOWN/UP` 记录，包含来源（Launcher/Quickstep）、空白页面通过情况和明确原因、tracker 当前是否正在跟踪、是否保留首次点击、是否构成双击。只记录成功/失败原因，不记录触摸位置、应用包名、按键内容。`BACK_DIAG` 总量最多 150 条/进程。
+- 将 Workspace 失败检查标记为 `homeGate`、`noWorkspace`、`outsideWorkspace`、`workspacePageTransition`、`cellOverlay`、`noShortcutGrid`、`iconOrWidget`、`overlappingPage`、`hotseatSearch`、`foregroundOverlay`、`noMatchingCellLayout`。不修改返回首页的处理条件，也不放宽防误触边界。
+- 在返回动画前后尝试双击后，运行 `su -c 'p=$(pidof com.google.android.apps.nexuslauncher); grep -hF "BACK_DIAG" /data/adb/lspd/log/verbose_*.log | grep " $p:" | tail -n 100'`。此版专供找问题，确认原因后换回无诊断日志版本。
