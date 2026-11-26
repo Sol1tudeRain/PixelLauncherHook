@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.8
+# Pixel Launcher Double Tap 3.2
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -187,3 +187,11 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - 保留 v2.7 的预测性返回 `LauncherBackAnimationController.startTransition()` Hook，短暂 BACKGROUND_APP 状态兼容，正常桌面及底部上滑返回 HOME 的双击识别、开关及 Root 锁屏路径不变。
 - 继续只保留真正的异常/错误日志，不恢复逐触摸调试信息。
 - 该修复解决了已确认的一处逻辑错误，但 ROM 上的侧滑返回能否生效仍需真机验证。
+
+## v3.2：修复侧边返回动画中的首次双击失效
+
+- v3.1 真机日志已经确认：侧边返回时 `QuickstepTransitionManager.createWallpaperOpenAnimations` 正常触发，`BACK COMMITTED` 正确，触摸进入 Launcher 且焦点可用。但 `AbstractFloatingView.getTopOpenView` 在首次触摸返回 `com.android.launcher3.views.ListenerView`，导致 `isHome()` 拒绝第一次按下；约 160 ms 后它消失，第二次按下反而被当作第一次点击。
+- AOSP `ListenerView` 是关联 `FloatingIconView` 动画的不可见辅助视图，默认 `GONE`，负责在关闭时执行回调，其 `onControllerInterceptTouchEvent` 会在 DOWN 调用 `handleClose(false)` 并返回 `false`，以便其他控件继续接收该事件。这与常规可交互浮窗不同。
+- 仅在确认侧边返回到桌面的短暂窗口，且 `getTopOpenView` 返回**精确类名** `com.android.launcher3.views.ListenerView`、该 View 可见性为 `GONE`，并且视图树中不存在任何其他正在打开的 `AbstractFloatingView` 时，允许经过 `isHome` 的浮动视图检查。
+- 其他桌面状态、上下滑手势、文件夹、图标、Widget、非 ListenerView 的弹窗、锁屏、滑动与多指保护全部保持不变；辅助视图检查失败时默认拒绝。
+- 这版基于 v2.8 的错误日志保留版，而非诊断版，默认不再输出 `BACK_DIAG`，不增加传感器监听、后台服务或轮询。Android 编译与 TapTracker 测试通过后还需真机验证。
