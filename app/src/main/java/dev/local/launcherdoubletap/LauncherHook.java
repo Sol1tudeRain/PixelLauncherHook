@@ -42,12 +42,17 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     // Both can see the same finger event around the focus handoff.
     private long handledDownTime=-1, handledEventTime=-1;
     private int handledAction=-1;
+    private String lastEmptyPageDecision="not-evaluated";
+    private View noBlankPage(String reason) {
+        lastEmptyPageDecision=reason;
+        return null;
+    }
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
     private final AtomicInteger diagnosticCount=new AtomicInteger();
     private void diag(String message) {
-        if(diagnosticCount.getAndIncrement()<110)
+        if(diagnosticCount.getAndIncrement()<150)
             XposedBridge.log(TAG+"BACK_DIAG "+message);
     }
     private Class<?> launcherClass, workspaceClass, cellClass, containerClass, floatingClass;
@@ -89,9 +94,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         if(isHandledDuplicate(event))return;
                         if(!a.hasWindowFocus())return;
                         boolean handoff=inHomeHandoff(a);
-                        if(event.getActionMasked()==MotionEvent.ACTION_DOWN)
-                            diag("Launcher DOWN handoff="+handoff+" back="+hasRecentBackReturn(a)
-                                +" home="+hasRecentQuickstepHomeTarget());
+                        // Tap-level diagnostics live in observe(), not here.
+                        // The Hook still processes the exact same MotionEvent.
                         observe(a,event,param,handoff);
                         markHandledEvent(event);
                     }
@@ -390,11 +394,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         // animation fully ends. Use the verified controller's own Launcher.
         if(backReturningLauncher!=null && hasRecentBackReturn(backReturningLauncher))
             a=backReturningLauncher;
-        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
-            diag("Quickstep DOWN launcher="+(a!=null)
-                    +" back="+(a!=null && hasRecentBackReturn(a))
-                    +" handoff="+(a!=null && inHomeHandoff(a))
-                    +" focused="+(a!=null && a.hasWindowFocus()));
+        // Only report the input stream while a back-to-home handoff is active.
         if(a==null || a.isFinishing() || !inHomeHandoff(a))return;
         if(!LauncherSettingsHook.isEnabled(a))return;
         if(isHandledDuplicate(e))return;
@@ -402,7 +402,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             if(e.getActionMasked()==MotionEvent.ACTION_DOWN)diag("Quickstep DOWN isHome rejected");
             return;
         }
-        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)diag("Quickstep DOWN isHome accepted");
+
         observe(a,e,null,true);
         markHandledEvent(e);
     }
@@ -431,11 +431,25 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             return;
         }
         TapTracker t=tracker(a);
-        if (e.getPointerCount()!=1 || e.getToolType(0)!=MotionEvent.TOOL_TYPE_FINGER) {t.reset(); return;}
+        final boolean diagnoseTap=hasRecentBackReturn(a);
+        if (e.getPointerCount()!=1 || e.getToolType(0)!=MotionEvent.TOOL_TYPE_FINGER) {
+            if(diagnoseTap)diag("TAP cancelled non-finger or multipointer action="+e.getActionMasked());
+            t.reset(); return;
+        }
         float x=e.getRawX(),y=e.getRawY();
         switch(e.getActionMasked()) {
-            case MotionEvent.ACTION_DOWN:
-                t.start(e.getEventTime(),x,y,emptyPage(a,x,y,prefocus)); break;
+            case MotionEvent.ACTION_DOWN: {
+                boolean prior=t.hasPrevious();
+                View page=emptyPage(a,x,y,prefocus);
+                if(diagnoseTap)
+                    diag("TAP DOWN source="+(p==null?"quickstep":"launcher")
+                            +" focus="+a.hasWindowFocus()
+                            +" page="+(page!=null)+" reason="+lastEmptyPageDecision
+                            +" previous="+prior);
+                t.start(e.getEventTime(),x,y,page);
+                if(diagnoseTap)diag("TAP DOWN tracking="+t.isDown()+" previous="+t.hasPrevious());
+                break;
+            }
             case MotionEvent.ACTION_MOVE:
                 if(t.isDown()) {
                     for(int i=0;i<e.getHistorySize();i++) {
@@ -444,23 +458,33 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     t.move(x,y);
                 }
                 break;
-            case MotionEvent.ACTION_UP:
-                if(t.isDown()) {
+            case MotionEvent.ACTION_UP: {
+                boolean tracking=t.isDown();
+                if(diagnoseTap)diag("TAP UP source="+(p==null?"quickstep":"launcher")
+                        +" tracking="+tracking+" previous="+t.hasPrevious());
+                if(tracking) {
                     View page=emptyPage(a,x,y,prefocus);
-                    if(t.finish(e.getEventTime(),x,y,page)) {
+                    boolean accepted=t.finish(e.getEventTime(),x,y,page);
+                    if(diagnoseTap)diag("TAP UP page="+(page!=null)
+                            +" reason="+lastEmptyPageDecision
+                            +" double="+accepted+" firstTap="+t.hasPrevious());
+                    if(accepted) {
                         if(p==null) {
-                            if(isHome(a,true)) {
-                                sleep(a);
-                            }
+                            boolean approved=isHome(a,true);
+                            if(diagnoseTap)diag("TAP quickstep double gate="+approved);
+                            if(approved)sleep(a);
                         } else {
                             p.setObjectExtra("launcherDoubleTap",true);
+                            if(diagnoseTap)diag("TAP launcher double accepted");
                         }
                     }
                 }
                 break;
+            }
             case MotionEvent.ACTION_CANCEL:
             case MotionEvent.ACTION_POINTER_DOWN:
             case MotionEvent.ACTION_POINTER_UP:
+                if(diagnoseTap)diag("TAP reset action="+e.getActionMasked());
                 t.reset(); break;
             default: break;
         }
@@ -524,8 +548,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                      && target==backgroundAppState)) {
             return false;
         }
-        if(prefocus)diag("state current="+String.valueOf(current)
-                +" target="+String.valueOf(target)+" committedBack="+committedBack);
+
         if(current==normalState)return true;
         if(prefocus && target==normalState)return true;
         if(committedBack && backgroundAppState!=null
@@ -539,10 +562,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         return false;
     }
     private View emptyPage(Activity a,float x,float y,boolean prefocus) throws Exception {
-        if(!isHome(a,prefocus)) return null;
+        lastEmptyPageDecision="unknown";
+        if(!isHome(a,prefocus)) return noBlankPage("homeGate");
         ViewGroup workspace=findWorkspace(a);
-        if(workspace==null) {return null;}
-        if(!hit(workspace,x,y)) {return null;}
+        if(workspace==null) return noBlankPage("noWorkspace");
+        if(!hit(workspace,x,y)) return noBlankPage("outsideWorkspace");
         try {
             if(Boolean.TRUE.equals(XposedHelpers.callMethod(workspace,"isPageInTransition"))) {
                 // A returning Launcher may already be NORMAL and have focus
@@ -558,9 +582,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 // committed back timestamp rather than the stale onResume.
                 if(prefocus && hasRecentBackReturn(a))
                     age=SystemClock.uptimeMillis()-lastBackReturnCommitAt;
-                if(age<0 || age>(prefocus ? EARLY_INPUT_WINDOW_MS : HOME_RESUME_GRACE_MS)) {
-                    return null;
-                }
+                if(age<0 || age>(prefocus ? EARLY_INPUT_WINDOW_MS : HOME_RESUME_GRACE_MS))
+                    return noBlankPage("workspacePageTransition");
             }
         } catch(NoSuchMethodError ignored) { /* optimized Pixel Launcher */ }
         // The visible workspace may have multiple pages on large displays.
@@ -573,20 +596,19 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 if(containerClass.isInstance(child))grid=(ViewGroup)child;
                 // Decorative CellLayout overlays are allowed. Only interactive
                 // children outside the shortcut container block an empty tap.
-                else if(hit(child,x,y) && (child.isClickable() || child.isLongClickable())) {
-                    return null;
-                }
+                else if(hit(child,x,y) && (child.isClickable() || child.isLongClickable()))
+                    return noBlankPage("cellOverlay");
             }
-            if(grid==null) {return null;}
+            if(grid==null)return noBlankPage("noShortcutGrid");
             // In Pixel Launcher the grid's clip rectangle can exclude the outer
             // page padding; use CellLayout's visible bounds to judge emptiness.
             // Still reject every actual icon/widget below.
             for(int j=0;j<grid.getChildCount();j++) {
-                if(hit(grid.getChildAt(j),x,y)) {return null;}
+                if(hit(grid.getChildAt(j),x,y))return noBlankPage("iconOrWidget");
             }
             // Exclude other visible workspace children on top of this page.
             for(int j=i+1;j<workspace.getChildCount();j++) {
-                if(hit(workspace.getChildAt(j),x,y))return null;
+                if(hit(workspace.getChildAt(j),x,y))return noBlankPage("overlappingPage");
             }
             // Exclude hotseat and any other sibling overlay touching this point.
             View branch=workspace;
@@ -599,18 +621,19 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     String name=sibling.getClass().getName();
                     if(name.contains("Hotseat") || name.contains("Search") || name.contains("Smartspace")
                             || name.contains("Qsb") || name.contains("QSB")) {
-                        return null;
+                        return noBlankPage("hotseatSearch");
                     }
                     if(j>index && (sibling.isClickable() || sibling.isLongClickable()
                             || floatingClass.isInstance(sibling))) {
-                        return null;
+                        return noBlankPage("foregroundOverlay");
                     }
                 }
                 branch=parent;
             }
+            lastEmptyPageDecision="accepted";
             return page;
         }
-        return null;
+        return noBlankPage("noMatchingCellLayout");
     }
     /**
      * AOSP Launcher3 keeps its Workspace in mWorkspace. Optimized Pixel Launcher
