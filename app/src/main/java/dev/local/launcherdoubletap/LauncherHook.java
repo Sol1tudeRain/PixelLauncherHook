@@ -286,8 +286,12 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     "createWallpaperOpenAnimations",new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     try {
-                        if(p.args.length!=7 || !Boolean.FALSE.equals(p.args[2])
-                                || p.args[0]==null || !p.args[0].getClass().isArray())
+                        // Launcher3's current animation has SIX parameters:
+                        // appTargets, wallpaperTargets, nonAppTargets, startRect,
+                        // cornerRadius, fromPredictiveBack. Some ROMs vary;
+                        // verify the actual target type, not a fixed count or
+                        // an unrelated third argument.
+                        if(p.args.length<1 || !(p.args[0] instanceof Object[]))
                             return;
                         Object[] targets=(Object[])p.args[0];
                         boolean hasClosingApp=false;
