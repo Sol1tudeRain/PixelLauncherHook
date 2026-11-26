@@ -1,4 +1,4 @@
-# Pixel Launcher Double Tap 2.7
+# Pixel Launcher Double Tap 2.8
 
 独立 LSPosed 模块，目标 PixelOS Android 15 的 Pixel Launcher (`com.google.android.apps.nexuslauncher`)。无需无障碍、设备管理员权限，不包含桌面图标、后台服务或常驻轮询。**直接将「双击桌面空白处锁屏」开关注入 Pixel Launcher → 主屏幕设置**，无需进入独立模块界面。默认开启，关闭后立即停止识别手势。只在桌面正常状态、空白 workspace 网格上识别双击；不消费原始触摸事件。不会修改 AOD / SystemUI / framework。通过正常休眠路径锁屏，是否立即锁屏取决于系统锁屏设置。
 
@@ -179,3 +179,11 @@ v2.3 真机日志证明系统已有的 swipe-up-disp0 输入监听已成功 Hook
 - 当 `LauncherState` 暂时仍为 `BACKGROUND_APP` 时，只有**已确认返回 HOME**的短窗口才允许早期检测；`ALL_APPS`、`OVERVIEW` 等仍被拒绝。
 - `Workspace.isPageInTransition` 的时间宽限在侧边返回场景改用返回提交时间，避免取到上次打开桌面的过期 `onResume()` 时间。
 - 不拦截系统手势、不创建新的 InputMonitor 或后台定时轮询。仍保留双击时间/移动距离限制，排除图标、Widget、浮窗、锁屏和多指。默认关闭详细日志，只留有用的失败信息。**实际效果需要真机安装验证**。
+
+## v2.8：修复返回桌面动画检测的参数错误
+
+- 修正 v2.7 中 `QuickstepTransitionManager.createWallpaperOpenAnimations` 的静态参数检查：之前错误地要求 7 个参数、第三个参数是 Boolean.FALSE，结果该兼容路径无法捕获 AOSP 的 6 参数签名。
+- 现在直接检查真实传入的 `RemoteAnimationTarget[] appTargets` 是否包含 `MODE_CLOSING` (1) 的应用目标，借此确认应用关闭到桌面的动画；不再依赖 OEM 可能改变的参数总数和 `fromPredictiveBack` 参数位置。
+- 保留 v2.7 的预测性返回 `LauncherBackAnimationController.startTransition()` Hook，短暂 BACKGROUND_APP 状态兼容，正常桌面及底部上滑返回 HOME 的双击识别、开关及 Root 锁屏路径不变。
+- 继续只保留真正的异常/错误日志，不恢复逐触摸调试信息。
+- 该修复解决了已确认的一处逻辑错误，但 ROM 上的侧滑返回能否生效仍需真机验证。
