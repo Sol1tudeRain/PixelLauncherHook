@@ -18,6 +18,7 @@ import java.lang.reflect.Modifier;
 import java.util.WeakHashMap;
 import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedBridge;
@@ -44,6 +45,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     private final AtomicBoolean sleeping=new AtomicBoolean();
     private boolean loggedFailure;
     private boolean loggedWorkspaceFailure;
+    private final AtomicInteger diagnosticCount=new AtomicInteger();
+    private void diag(String message) {
+        if(diagnosticCount.getAndIncrement()<110)
+            XposedBridge.log(TAG+"BACK_DIAG "+message);
+    }
     private Class<?> launcherClass, workspaceClass, cellClass, containerClass, floatingClass;
     private Object normalState, backgroundAppState;
     private Method topOpen;
@@ -83,6 +89,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         if(isHandledDuplicate(event))return;
                         if(!a.hasWindowFocus())return;
                         boolean handoff=inHomeHandoff(a);
+                        if(event.getActionMasked()==MotionEvent.ACTION_DOWN)
+                            diag("Launcher DOWN handoff="+handoff+" back="+hasRecentBackReturn(a)
+                                +" home="+hasRecentQuickstepHomeTarget());
                         observe(a,event,param,handoff);
                         markHandledEvent(event);
                     }
@@ -104,6 +113,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         Activity a=(Activity)p.thisObject;
                         lastResumeTimes.put(a,SystemClock.uptimeMillis());
                         resumedLauncher=a;
+                        diag("Launcher onResume back="+hasRecentBackReturn(a));
                     }
                 }
             });
@@ -111,6 +121,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
                     if (launcherClass.isInstance(p.thisObject)) {
                         Activity a=(Activity)p.thisObject;
+                        diag("Launcher onPause back="+hasRecentBackReturn(a));
                         reset(a);
                         if(resumedLauncher==a)resumedLauncher=null;
                         lastQuickstepHomeTargetAt=-1;
@@ -124,6 +135,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             installQuickstepInputHook(cl);
             installQuickstepHomeTargetHook(cl);
             installBackToHomeHook(cl);
+            diag("diagnostic build initialized");
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
     }
     /**
@@ -262,15 +274,27 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                     "com.android.quickstep.LauncherBackAnimationController",cl);
             int hooks=XposedBridge.hookAllMethods(back,"startTransition",new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    diag("predictive startTransition CALLED argc="+p.args.length);
                     try {
                         Object launcher=XposedHelpers.getObjectField(p.thisObject,"mLauncher");
                         Object departing=XposedHelpers.getObjectField(p.thisObject,"mBackTarget");
+                        diag("predictive launcherValid="+launcherClass.isInstance(launcher)
+                                +" backTargetPresent="+(departing!=null));
                         if(departing!=null && launcherClass.isInstance(launcher)) {
                             markCommittedBackToHome((Activity)launcher);
                         }
                     } catch(Throwable e) {report(e);}
                 }
             }).size();
+            diag("predictive startTransition hooks="+hooks);
+            for(final String method:new String[]{"onBackStarted","onBackInvoked","onBackCancelled"}) {
+                int matched=XposedBridge.hookAllMethods(back,method,new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam p) {
+                        diag("predictive "+method+" called");
+                    }
+                }).size();
+                if(matched>0)diag("predictive "+method+" hooks="+matched);
+            }
             if(hooks==0)
                 XposedBridge.log(TAG+"Predictive back transition entry point unavailable");
         } catch(Throwable e) {
@@ -285,6 +309,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             int hooks=XposedBridge.hookAllMethods(transitions,
                     "createWallpaperOpenAnimations",new XC_MethodHook() {
                 @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    diag("legacy wallpaper animation CALLED argc="+p.args.length);
                     try {
                         // Launcher3's current animation has SIX parameters:
                         // appTargets, wallpaperTargets, nonAppTargets, startRect,
@@ -303,13 +328,16 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                                 break;
                             }
                         }
+                        diag("legacy targets="+targets.length+" closingApp="+hasClosingApp);
                         if(!hasClosingApp)return;
                         Object launcher=XposedHelpers.getObjectField(p.thisObject,"mLauncher");
+                        diag("legacy launcherValid="+launcherClass.isInstance(launcher));
                         if(launcherClass.isInstance(launcher))
                             markCommittedBackToHome((Activity)launcher);
                     } catch(Throwable e) {report(e);}
                 }
             }).size();
+            diag("legacy wallpaper hook count="+hooks);
             if(hooks==0)
                 XposedBridge.log(TAG+"Legacy app-close-to-home animation entry point unavailable");
         } catch(Throwable e) {
@@ -320,6 +348,7 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         if(a==null || a.isFinishing())return;
         backReturningLauncher=a;
         lastBackReturnCommitAt=SystemClock.uptimeMillis();
+        diag("BACK COMMITTED");
     }
     private boolean hasRecentBackReturn(Activity a) {
         if(a==null || a!=backReturningLauncher || lastBackReturnCommitAt<0)return false;
@@ -361,10 +390,19 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         // animation fully ends. Use the verified controller's own Launcher.
         if(backReturningLauncher!=null && hasRecentBackReturn(backReturningLauncher))
             a=backReturningLauncher;
+        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)
+            diag("Quickstep DOWN launcher="+(a!=null)
+                    +" back="+(a!=null && hasRecentBackReturn(a))
+                    +" handoff="+(a!=null && inHomeHandoff(a))
+                    +" focused="+(a!=null && a.hasWindowFocus()));
         if(a==null || a.isFinishing() || !inHomeHandoff(a))return;
         if(!LauncherSettingsHook.isEnabled(a))return;
         if(isHandledDuplicate(e))return;
-        if(!isHome(a,true))return;
+        if(!isHome(a,true)) {
+            if(e.getActionMasked()==MotionEvent.ACTION_DOWN)diag("Quickstep DOWN isHome rejected");
+            return;
+        }
+        if(e.getActionMasked()==MotionEvent.ACTION_DOWN)diag("Quickstep DOWN isHome accepted");
         observe(a,e,null,true);
         markHandledEvent(e);
     }
@@ -437,7 +475,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
         if(km==null || km.isKeyguardLocked()) {return false;}
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
-        if(manager==null || !normalLauncherState(manager,prefocus,a)) {return false;}
+        if(manager==null || !normalLauncherState(manager,prefocus,a)) {
+            if(prefocus)diag("isHome reject: state"); return false;
+        }
         if(topOpen.invoke(null,a)!=null) {return false;}
         return true;
     }
@@ -484,6 +524,8 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                      && target==backgroundAppState)) {
             return false;
         }
+        if(prefocus)diag("state current="+String.valueOf(current)
+                +" target="+String.valueOf(target)+" committedBack="+committedBack);
         if(current==normalState)return true;
         if(prefocus && target==normalState)return true;
         if(committedBack && backgroundAppState!=null
