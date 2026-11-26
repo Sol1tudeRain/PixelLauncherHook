@@ -32,6 +32,11 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     // Short-lived pre-focus input handoff while Quickstep returns to home.
     private static final long EARLY_INPUT_WINDOW_MS=2000;
     private Activity resumedLauncher;
+    // Predictive / legacy BACK-to-home does not use GestureState.setEndTarget(HOME).
+    // Predictive back can also run before Launcher.onResume().
+    private Activity backReturningLauncher;
+    private long lastBackReturnCommitAt=-1;
+    private static final long BACK_RETURN_WINDOW_MS=2400;
     // Shared event identity for the Quickstep monitor / Launcher window.
     // Both can see the same finger event around the focus handoff.
     private long handledDownTime=-1, handledEventTime=-1;
@@ -107,11 +112,16 @@ public final class LauncherHook implements IXposedHookLoadPackage {
                         reset(a);
                         if(resumedLauncher==a)resumedLauncher=null;
                         lastQuickstepHomeTargetAt=-1;
+                        if(backReturningLauncher==a) {
+                            backReturningLauncher=null;
+                            lastBackReturnCommitAt=-1;
+                        }
                     }
                 }
             });
             installQuickstepInputHook(cl);
             installQuickstepHomeTargetHook(cl);
+            installBackToHomeHook(cl);
         } catch(Throwable e) { XposedBridge.log(TAG+"Installation failed: "+e); }
     }
     /**
@@ -239,6 +249,77 @@ public final class LauncherHook implements IXposedHookLoadPackage {
             XposedBridge.log(TAG+"Quickstep gesture destination hook unavailable: "+e);
         }
     }
+    /**
+     * Predictive back-to-home is dispatched by WM Shell to the LauncherBackAnimationController.
+     * Hook only the committed transition, NEVER onBackStarted/onBackProgressed,
+     * since those may be cancelled without navigating home.
+     */
+    private void installBackToHomeHook(ClassLoader cl) {
+        try {
+            Class<?> back=XposedHelpers.findClass(
+                    "com.android.quickstep.LauncherBackAnimationController",cl);
+            int hooks=XposedBridge.hookAllMethods(back,"startTransition",new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    try {
+                        Object launcher=XposedHelpers.getObjectField(p.thisObject,"mLauncher");
+                        Object departing=XposedHelpers.getObjectField(p.thisObject,"mBackTarget");
+                        if(departing!=null && launcherClass.isInstance(launcher)) {
+                            markCommittedBackToHome((Activity)launcher);
+                        }
+                    } catch(Throwable e) {report(e);}
+                }
+            }).size();
+            if(hooks==0)
+                XposedBridge.log(TAG+"Predictive back transition entry point unavailable");
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Predictive back-to-home hook unavailable: "+e);
+        }
+        // Older apps use legacy back without an OnBackInvokedDispatcher.
+        // Quickstep's wallpaper-open animation is a distinct return-home
+        // transition for legacy app-close, not Quickstep GestureState HOME.
+        try {
+            Class<?> transitions=XposedHelpers.findClass(
+                    "com.android.launcher3.QuickstepTransitionManager",cl);
+            int hooks=XposedBridge.hookAllMethods(transitions,
+                    "createWallpaperOpenAnimations",new XC_MethodHook() {
+                @Override protected void beforeHookedMethod(MethodHookParam p) {
+                    try {
+                        if(p.args.length!=7 || !Boolean.FALSE.equals(p.args[2])
+                                || p.args[0]==null || !p.args[0].getClass().isArray())
+                            return;
+                        Object[] targets=(Object[])p.args[0];
+                        boolean hasClosingApp=false;
+                        for(Object target:targets) {
+                            if(target==null)continue;
+                            // MODE_CLOSING is 1 in Android RemoteAnimationTarget.
+                            if(XposedHelpers.getIntField(target,"mode")==1) {
+                                hasClosingApp=true;
+                                break;
+                            }
+                        }
+                        if(!hasClosingApp)return;
+                        Object launcher=XposedHelpers.getObjectField(p.thisObject,"mLauncher");
+                        if(launcherClass.isInstance(launcher))
+                            markCommittedBackToHome((Activity)launcher);
+                    } catch(Throwable e) {report(e);}
+                }
+            }).size();
+            if(hooks==0)
+                XposedBridge.log(TAG+"Legacy app-close-to-home animation entry point unavailable");
+        } catch(Throwable e) {
+            XposedBridge.log(TAG+"Legacy app-close-to-home hook unavailable: "+e);
+        }
+    }
+    private void markCommittedBackToHome(Activity a) {
+        if(a==null || a.isFinishing())return;
+        backReturningLauncher=a;
+        lastBackReturnCommitAt=SystemClock.uptimeMillis();
+    }
+    private boolean hasRecentBackReturn(Activity a) {
+        if(a==null || a!=backReturningLauncher || lastBackReturnCommitAt<0)return false;
+        long age=SystemClock.uptimeMillis()-lastBackReturnCommitAt;
+        return age>=0 && age<=BACK_RETURN_WINDOW_MS;
+    }
     private boolean hasRecentQuickstepHomeTarget() {
         long age=SystemClock.uptimeMillis()-lastQuickstepHomeTargetAt;
         return lastQuickstepHomeTargetAt>=0 && age>=0
@@ -255,6 +336,10 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         handledAction=e.getActionMasked();
     }
     private boolean inHomeHandoff(Activity a) {
+        if(a==null || a.isFinishing())return false;
+        // A confirmed back-to-home transition is enough, even when onResume
+        // is deferred until the predictive-back animation has completed.
+        if(hasRecentBackReturn(a))return true;
         Long resumedAt=lastResumeTimes.get(a);
         if(resumedAt==null || !hasRecentQuickstepHomeTarget())return false;
         long age=SystemClock.uptimeMillis()-resumedAt;
@@ -266,6 +351,10 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         // cannot be split between two independent event streams.
         if(Looper.myLooper()!=Looper.getMainLooper())return;
         Activity a=resumedLauncher;
+        // During predictive BACK, Launcher may not receive onResume until the
+        // animation fully ends. Use the verified controller's own Launcher.
+        if(backReturningLauncher!=null && hasRecentBackReturn(backReturningLauncher))
+            a=backReturningLauncher;
         if(a==null || a.isFinishing() || !inHomeHandoff(a))return;
         if(!LauncherSettingsHook.isEnabled(a))return;
         if(isHandledDuplicate(e))return;
@@ -390,7 +479,9 @@ public final class LauncherHook implements IXposedHookLoadPackage {
         // Quickstep's HOME gesture is a stronger indication of the actual
         // destination than a nullable/optimized StateManager target. Only
         // the currently resumed, unfocused launcher can use this exemption.
-        if(prefocus && target==null && hasRecentQuickstepHomeTarget()) {
+        if(prefocus && target==null
+                && (hasRecentQuickstepHomeTarget()
+                    || hasRecentBackReturn(backReturningLauncher))) {
             return true;
         }
         return false;
