@@ -491,18 +491,30 @@ public final class LauncherHook implements IXposedHookLoadPackage {
     }
     private boolean isHome(Activity a) throws Exception {return isHome(a,false);}
     private boolean isHome(Activity a,boolean prefocus) throws Exception {
-        // Early HOME input can continue after focus is obtained. The caller
-        // must have already verified the recent Quickstep HOME destination.
+        // Diagnose only committed side-BACK handoff failures. Ordinary home
+        // taps and swipe-up HOME follow exactly the preexisting predicates.
+        final boolean backDiag=prefocus && hasRecentBackReturn(a);
         if(a.isFinishing() || (!prefocus && !a.hasWindowFocus())) {
+            if(backDiag)diag("isHome reject: activity finishing="+a.isFinishing()
+                    +" focused="+a.hasWindowFocus());
             return false;
         }
         KeyguardManager km=(KeyguardManager)a.getSystemService(Context.KEYGUARD_SERVICE);
-        if(km==null || km.isKeyguardLocked()) {return false;}
+        if(km==null || km.isKeyguardLocked()) {
+            if(backDiag)diag("isHome reject: keyguard managerMissing="+(km==null)
+                    +" locked="+(km!=null && km.isKeyguardLocked()));
+            return false;
+        }
         Object manager=XposedHelpers.callMethod(a,"getStateManager");
         if(manager==null || !normalLauncherState(manager,prefocus,a)) {
-            if(prefocus)diag("isHome reject: state"); return false;
+            if(backDiag)diag("isHome reject: state managerMissing="+(manager==null));
+            return false;
         }
-        if(topOpen.invoke(null,a)!=null) {return false;}
+        Object popup=topOpen.invoke(null,a);
+        if(popup!=null) {
+            if(backDiag)diag("isHome reject: floatingView class="+popup.getClass().getName());
+            return false;
+        }
         return true;
     }
     /**
